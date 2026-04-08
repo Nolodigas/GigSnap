@@ -333,11 +333,11 @@ select.field-input{appearance:none;background-image:url("data:image/svg+xml,%3Cs
 let state = {
   view: 'home',
   events: [],
-  apiKey: '',
   calMonth: new Date().getMonth(),
   calYear: new Date().getFullYear(),
   detailId: null,
   editId: null,
+  updating: false,
 };
 
 const CATS = {
@@ -351,12 +351,25 @@ const CATS = {
 
 function save() {
   localStorage.setItem('gigsnap_events', JSON.stringify(state.events));
-  localStorage.setItem('gigsnap_key', state.apiKey);
 }
 function load() {
   state.events = JSON.parse(localStorage.getItem('gigsnap_events') || '[]');
-  state.apiKey = localStorage.getItem('gigsnap_key') || '';
 }
+function getCache() {
+  try { return JSON.parse(localStorage.getItem('gigsnap_search_cache') || '{}'); }
+  catch { return {}; }
+}
+function saveCache(cache) {
+  localStorage.setItem('gigsnap_search_cache', JSON.stringify(cache));
+}
+function clearCache() {
+  localStorage.removeItem('gigsnap_search_cache');
+}
+const SEARCH_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+const AUTO_UPDATE_INTERVAL_MS = 15 * 60 * 1000;
+const MONTHS = {ene:1,enero:1,jan:1,january:1,feb:2,febrero:2,february:2,mar:3,marzo:3,march:3,abr:4,abril:4,apr:4,april:4,may:5,mayo:5,jun:6,junio:6,june:6,jul:7,julio:7,july:7,ago:8,agosto:8,aug:8,august:8,sep:9,september:9,septiembre:9,setiembre:9,oct:10,octubre:10,october:10,nov:11,noviembre:11,november:11,dic:12,diciembre:12,dec:12,december:12};
+const SOURCE_HINTS = ['wegow','ticketmaster','dice.fm','feverup','songkick','bandsintown','entradas.com','lasttour','area12alicante','madcool','primaverasound','viagogo'];
+
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
 function fmt(dateStr) {
   if(!dateStr) return '';
@@ -390,6 +403,276 @@ function getNextEvent() {
   return state.events
     .filter(e => e.date && new Date(e.date + 'T12:00:00') >= today)
     .sort((a,b) => a.date.localeCompare(b.date))[0] || null;
+}
+
+function isUrl(value) {
+  return /^https?:\/\//i.test((value || '').trim());
+}
+function normalizeText(value) {
+  return (value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+function slug(value) {
+  return normalizeText(value).replace(/[^a-z0-9]+/g, ' ').trim();
+}
+function cacheKey(query, province) {
+  return slug(`${query} ${province || ''}`);
+}
+function dedupe(arr) {
+  return [...new Set(arr.filter(Boolean))];
+}
+function decodeHtmlEntities(str) {
+  const t = document.createElement('textarea');
+  t.innerHTML = str || '';
+  return t.value;
+}
+function cleanFetchText(text) {
+  return decodeHtmlEntities(String(text || ''))
+    .replace(/\r/g, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+function inferYear(day, month, explicitYear, text) {
+  if (explicitYear) return explicitYear;
+  const years = [...String(text || '').matchAll(/\b(20\d{2})\b/g)].map(m => Number(m[1]));
+  const now = new Date();
+  let year = years.find(y => y >= now.getFullYear()) || now.getFullYear();
+  const candidate = new Date(year, month - 1, day, 12, 0, 0);
+  if (candidate < new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30)) year += 1;
+  return year;
+}
+function findDate(text) {
+  const source = normalizeText(text);
+  const patterns = [
+    /(\d{1,2})\s+(ene|enero|feb|febrero|mar|marzo|abr|abril|may|mayo|jun|junio|jul|julio|ago|agosto|sep|septiembre|setiembre|oct|octubre|nov|noviembre|dic|diciembre)\.?\s*(20\d{2})?/i,
+    /(\d{1,2})\s+(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|september|oct|october|nov|november|dec|december)\.?\s*(20\d{2})?/i,
+    /(20\d{2})-(\d{2})-(\d{2})/
+  ];
+  for (let i = 0; i < patterns.length; i += 1) {
+    const pattern = patterns[i];
+    const m = source.match(pattern);
+    if (!m) continue;
+    if (i === 2) return `${m[1]}-${m[2]}-${m[3]}`;
+    const day = Number(m[1]);
+    const month = MONTHS[m[2]];
+    if (!month) continue;
+    const year = inferYear(day, month, m[3] ? Number(m[3]) : null, source);
+    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  }
+  return '';
+}
+function normalizeTime(match) {
+  if (!match) return '';
+  let [, hh, mm, ampm] = match;
+  let hour = Number(hh);
+  const min = mm || '00';
+  ampm = (ampm || '').toLowerCase();
+  if (ampm === 'pm' && hour < 12) hour += 12;
+  if (ampm === 'am' && hour === 12) hour = 0;
+  return `${String(hour).padStart(2, '0')}:${min}`;
+}
+function findTime(text, labelRegex) {
+  const source = String(text || '');
+  if (labelRegex) {
+    const block = source.match(labelRegex);
+    if (block) {
+      const t = block[0].match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+      return normalizeTime(t);
+    }
+  }
+  const m = source.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+  return normalizeTime(m);
+}
+function extractLinks(text) {
+  const links = [];
+  const raw = String(text || '');
+  for (const m of raw.matchAll(/https?:\/\/[^\s)\]>"']+/g)) links.push(m[0]);
+  for (const m of raw.matchAll(/\((https?:\/\/[^)]+)\)/g)) links.push(m[1]);
+  return dedupe(links);
+}
+function looksLikeEventUrl(url) {
+  return /(event|events|festival|festivales|concierto|conciertos|agenda|programacion|tickets|entradas|tour|gig)/i.test(url);
+}
+function scoreUrl(url, query) {
+  const s = slug(url);
+  let score = 0;
+  for (const token of slug(query).split(' ').filter(t => t.length > 2)) {
+    if (s.includes(token)) score += 2;
+  }
+  if (looksLikeEventUrl(url)) score += 4;
+  if (SOURCE_HINTS.some(h => s.includes(h))) score += 3;
+  if (/facebook|instagram|x\.com|twitter|youtube|tiktok/.test(s)) score -= 2;
+  return score;
+}
+async function proxyFetchText(url) {
+  const cleanUrl = String(url || '').trim();
+  const proxied = `https://r.jina.ai/http://${cleanUrl.replace(/^https?:\/\//i, '')}`;
+  const resp = await fetch(proxied, { headers: { Accept: 'text/plain' } });
+  if (!resp.ok) throw new Error(`No se pudo leer ${cleanUrl}`);
+  return cleanFetchText(await resp.text());
+}
+async function findCandidateUrls(query, province) {
+  if (isUrl(query)) return [query.trim()];
+  const finalQuery = [query, province, 'concierto festival entradas España'].filter(Boolean).join(' ');
+  const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(finalQuery)}`;
+  const searchText = await proxyFetchText(searchUrl);
+  const urls = extractLinks(searchText)
+    .filter(url => /^https?:\/\//i.test(url))
+    .filter(url => !/duckduckgo\.com|duck\.co|google\.|bing\.|yahoo\./i.test(url))
+    .sort((a, b) => scoreUrl(b, query) - scoreUrl(a, query));
+  return dedupe(urls).slice(0, 8);
+}
+function takeParagraphAfter(label, text) {
+  const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const idx = lines.findIndex(line => normalizeText(line).includes(normalizeText(label)));
+  if (idx === -1) return '';
+  const out = [];
+  for (const line of lines.slice(idx + 1)) {
+    if (/^###/.test(line)) break;
+    out.push(line);
+    if (out.length >= 2) break;
+  }
+  return out.join(' ').trim();
+}
+function extractAddress(text) {
+  const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const hit = lines.find(line => /\d{5}/.test(line) && /,/.test(line));
+  return hit || '';
+}
+function extractCity(address, text) {
+  const src = `${address}\n${text}`;
+  const m = src.match(/\b(Madrid|Barcelona|Valencia|Sevilla|Málaga|Malaga|Bilbao|Alicante|Alacant|Murcia|Zaragoza|Granada|Córdoba|Cordoba|Vigo|Gijón|Gijon|Santander|Pamplona|Salamanca|Valladolid|A Coruña|Coruña|Las Palmas|Oviedo|León|Leon|Almería|Almeria|Cádiz|Cadiz|Donostia|San Sebastián|San Sebastian)\b/i);
+  return m ? m[1] : '';
+}
+function buildLineup(name, text, type) {
+  const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const lineupLine = lines.find(line => /lineup|cartel|artistas/i.test(line) && line.length < 240);
+  if (lineupLine) {
+    return dedupe(lineupLine.split(/[,·|]/).map(s => s.trim()).filter(s => s && s.length < 60));
+  }
+  return type === 'festival' ? [] : [name].filter(Boolean);
+}
+function guessType(name, query, url) {
+  const src = slug(`${name} ${query} ${url}`);
+  return /(festival|fest|sound|sonorama|mad cool|primavera)/.test(src) ? 'festival' : 'concierto';
+}
+function scoreResult(info, query) {
+  const haystack = slug(`${info.name} ${info.venue} ${info.city} ${info.description} ${info.sourceUrl}`);
+  let score = 0;
+  for (const token of slug(query).split(' ').filter(t => t.length > 2)) {
+    if (haystack.includes(token)) score += 3;
+  }
+  if (info.date) score += 5;
+  if (info.venue) score += 2;
+  if (info.ticketUrl) score += 2;
+  if (info.description) score += 1;
+  if (SOURCE_HINTS.some(h => haystack.includes(h))) score += 1;
+  return score;
+}
+function parseEventText(text, sourceUrl, originalQuery) {
+  const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const heading = (lines.find(line => line.startsWith('# ')) || '').replace(/^#\s+/, '');
+  const altTitle = lines.find(line => line.length > 4 && line.length < 90 && !/^https?:/i.test(line) && !/^(menu|home|close search|event details|time|location|inicio|apertura de puertas)$/i.test(line));
+  const name = heading || altTitle || originalQuery;
+  const type = guessType(name, originalQuery, sourceUrl);
+  const date = findDate(text);
+  const time = findTime(text, /(?:^|\n)(?:time|hora|inicio)[\s\S]{0,80}/i);
+  const doorsTime = findTime(text, /(?:apertura de puertas|doors)[\s\S]{0,60}/i);
+  const venue = takeParagraphAfter('location', text) || takeParagraphAfter('recinto', text) || takeParagraphAfter('venue', text) || '';
+  const address = extractAddress(text);
+  const city = extractCity(address, text);
+  const ticketUrl = extractLinks(text).find(url => /ticket|entrad|dice\.fm|wegow|ticketmaster|fever/i.test(url)) || '';
+  const website = sourceUrl;
+  const detail = takeParagraphAfter('event details', text) || takeParagraphAfter('descripcion', text) || takeParagraphAfter(name, text);
+  const description = (detail || '').slice(0, 220);
+  const lineup = buildLineup(name, text, type);
+  return {
+    name,
+    type,
+    date,
+    dateEnd: '',
+    time,
+    doorsTime,
+    venue,
+    address,
+    city,
+    country: 'España',
+    description,
+    lineup,
+    website,
+    ticketUrl,
+    price: '',
+    sourceUrl,
+    lastCheckedAt: Date.now(),
+  };
+}
+async function resolveEventInfo(query, province='') {
+  const key = cacheKey(query, province);
+  const cache = getCache();
+  const hit = cache[key];
+  if (hit && Date.now() - hit.savedAt < SEARCH_CACHE_TTL_MS) return hit.data;
+  const urls = await findCandidateUrls(query, province);
+  if (!urls.length) throw new Error('No encontré resultados públicos reutilizables');
+  const candidates = [];
+  for (const url of urls.slice(0, 5)) {
+    try {
+      const pageText = await proxyFetchText(url);
+      const parsed = parseEventText(pageText, url, query);
+      parsed._score = scoreResult(parsed, query);
+      candidates.push(parsed);
+    } catch (err) {
+      console.warn('GigSnap search skip', url, err);
+    }
+  }
+  const best = candidates.sort((a, b) => b._score - a._score)[0];
+  if (!best || (!best.name && !best.date && !best.venue)) throw new Error('No pude estructurar el evento');
+  delete best._score;
+  cache[key] = { savedAt: Date.now(), data: best };
+  saveCache(cache);
+  return best;
+}
+async function maybeAutoUpdateEvents(force=false) {
+  if (state.updating) return;
+  const pending = state.events.filter(ev => (ev.sourceUrl || ev.website) && (!ev.lastCheckedAt || force || Date.now() - ev.lastCheckedAt > SEARCH_CACHE_TTL_MS));
+  if (!pending.length) return;
+  state.updating = true;
+  let updated = 0;
+  for (const ev of pending.slice(0, 5)) {
+    try {
+      const fresh = await resolveEventInfo(ev.sourceUrl || ev.website || ev.name, ev.searchProvince || '');
+      const merged = {
+        ...ev,
+        date: fresh.date || ev.date,
+        dateEnd: fresh.dateEnd || ev.dateEnd,
+        time: fresh.time || ev.time,
+        doorsTime: fresh.doorsTime || ev.doorsTime,
+        venue: fresh.venue || ev.venue,
+        address: fresh.address || ev.address,
+        city: fresh.city || ev.city,
+        description: fresh.description || ev.description,
+        lineup: fresh.lineup?.length ? fresh.lineup : ev.lineup,
+        website: fresh.website || ev.website,
+        ticketUrl: fresh.ticketUrl || ev.ticketUrl,
+        sourceUrl: fresh.sourceUrl || ev.sourceUrl,
+        lastCheckedAt: Date.now(),
+      };
+      if (JSON.stringify(merged) !== JSON.stringify(ev)) {
+        Object.assign(ev, merged);
+        updated += 1;
+      } else {
+        ev.lastCheckedAt = Date.now();
+      }
+    } catch (err) {
+      ev.lastCheckedAt = Date.now();
+    }
+  }
+  save();
+  state.updating = false;
+  if (updated) showToast(`🔄 ${updated} evento(s) actualizado(s)`);
+  if (state.view === 'detail' || state.view === 'events' || state.view === 'home') render();
 }
 
 /* ═══════════════════════════════════════
@@ -469,7 +752,7 @@ function renderHome() {
       <button onclick="goTo('search')" style="background:white;border:1.5px solid rgba(86,41,255,.1);border-radius:16px;padding:18px;text-align:center;box-shadow:0 2px 12px rgba(86,41,255,.08)">
         <div style="font-size:28px">🔍</div>
         <div style="font-size:14px;font-weight:800;color:var(--ink);margin-top:6px">Buscar evento</div>
-        <div style="font-size:12px;color:var(--t3);margin-top:2px">Con IA</div>
+        <div style="font-size:12px;color:var(--t3);margin-top:2px">Sin API</div>
       </button>
       <button onclick="goTo('addEdit')" style="background:white;border:1.5px solid rgba(86,41,255,.1);border-radius:16px;padding:18px;text-align:center;box-shadow:0 2px 12px rgba(86,41,255,.08)">
         <div style="font-size:28px">✏️</div>
@@ -505,20 +788,27 @@ function renderSearch() {
   return `
     <div style="padding:20px 16px 8px">
       <div style="font-family:'Fraunces',serif;font-size:28px;font-weight:900;color:var(--ink);margin-bottom:4px">Buscar evento 🔍</div>
-      <div style="font-size:15px;color:var(--t2);margin-bottom:20px">Escribe el nombre de un concierto o festival y la IA buscará toda la información por ti.</div>
+      <div style="font-size:15px;color:var(--t2);margin-bottom:20px">Búsqueda sin claves API. GigSnap consulta páginas públicas, guarda una caché local y reutiliza la fuente oficial del evento para futuras actualizaciones.</div>
       <div class="search-box" style="margin-bottom:12px">
-        <input id="search-input" type="text" placeholder="Ej: Imagina Funk, Primavera Sound…" autocomplete="off" onkeydown="if(event.key==='Enter')doSearch()">
+        <input id="search-input" type="text" placeholder="Ej: The Black Crowes, Mad Cool, o pega la URL oficial" autocomplete="off" onkeydown="if(event.key==='Enter')doSearch()">
         <button onclick="doSearch()" style="font-size:22px">🔍</button>
       </div>
+      <div style="display:grid;grid-template-columns:1fr;gap:10px;margin-bottom:12px">
+        <select class="field-input" id="search-province">
+          <option value="">Toda España</option>
+          <option>A Coruña</option><option>Álava</option><option>Albacete</option><option>Alicante</option><option>Almería</option><option>Asturias</option><option>Ávila</option><option>Badajoz</option><option>Barcelona</option><option>Burgos</option><option>Cáceres</option><option>Cádiz</option><option>Cantabria</option><option>Castellón</option><option>Ciudad Real</option><option>Córdoba</option><option>Cuenca</option><option>Girona</option><option>Granada</option><option>Guadalajara</option><option>Gipuzkoa</option><option>Huelva</option><option>Huesca</option><option>Jaén</option><option>La Rioja</option><option>Las Palmas</option><option>León</option><option>Lleida</option><option>Lugo</option><option>Madrid</option><option>Málaga</option><option>Murcia</option><option>Navarra</option><option>Ourense</option><option>Palencia</option><option>Pontevedra</option><option>Salamanca</option><option>Segovia</option><option>Sevilla</option><option>Soria</option><option>Tarragona</option><option>Santa Cruz de Tenerife</option><option>Teruel</option><option>Toledo</option><option>Valencia</option><option>Valladolid</option><option>Bizkaia</option><option>Zamora</option><option>Zaragoza</option>
+        </select>
+      </div>
       <button class="btn-grad" onclick="doSearch()">
-        <span id="search-btn-content">✨ Buscar con IA</span>
+        <span id="search-btn-content">🌐 Buscar sin API</span>
       </button>
     </div>
     <div id="search-results" style="padding-top:8px"></div>
     <div style="padding:16px;margin-top:8px">
       <div style="background:rgba(86,41,255,.06);border-radius:12px;padding:14px 16px">
-        <div style="font-size:13px;font-weight:700;color:var(--t2);margin-bottom:6px">💡 También puedes añadir eventos manualmente:</div>
-        <button class="btn-ghost" style="width:100%" onclick="goTo('addEdit')">✏️ Añadir sin buscar</button>
+        <div style="font-size:13px;font-weight:700;color:var(--t2);margin-bottom:6px">💡 Consejo</div>
+        <div style="font-size:14px;color:var(--t2);line-height:1.5;margin-bottom:10px">Si pegas la URL oficial del evento, la extracción es más precisa y esa misma fuente se reutiliza para las auto-actualizaciones.</div>
+        <button class="btn-ghost" style="width:100%" onclick="goTo('addEdit')">✏️ Añadir manualmente</button>
       </div>
     </div>
   `;
@@ -526,87 +816,28 @@ function renderSearch() {
 
 async function doSearch() {
   const q = document.getElementById('search-input')?.value?.trim();
-  if(!q) return;
-  if(!state.apiKey) { showApiKeyModal(() => doSearch()); return; }
+  const province = document.getElementById('search-province')?.value?.trim() || '';
+  if (!q) return;
 
   const res = document.getElementById('search-results');
   const btn = document.getElementById('search-btn-content');
-  res.innerHTML = `<div class="loading-card"><div class="spinner-big"></div><p>Buscando información sobre "${q}"…<br><span style="font-size:13px;color:var(--t3)">La IA está consultando internet</span></p></div>`;
-  if(btn) btn.innerHTML = '<span class="spinner"></span> Buscando…';
+  res.innerHTML = `<div class="loading-card"><div class="spinner-big"></div><p>Buscando información pública sobre "${esc(q)}"…<br><span style="font-size:13px;color:var(--t3)">Sin API key · caché local activa</span></p></div>`;
+  if (btn) btn.innerHTML = '<span class="spinner"></span> Buscando…';
 
   try {
-    const systemPrompt = `Eres un asistente especializado en conciertos y festivales de música. 
-Cuando el usuario busque un evento, usa web_search para encontrar información oficial y actual.
-Busca en la web oficial del evento, redes sociales y webs de ticketing.
-Devuelve ÚNICAMENTE un objeto JSON válido (sin texto antes ni después, sin backticks) con esta estructura exacta:
-{
-  "name": "Nombre oficial del evento",
-  "type": "concierto o festival",
-  "date": "YYYY-MM-DD o null si no se sabe",
-  "dateEnd": "YYYY-MM-DD o null (solo para festivales de varios días)",
-  "time": "HH:MM o null",
-  "doorsTime": "HH:MM o null",
-  "venue": "Nombre del recinto",
-  "address": "Dirección completa",
-  "city": "Ciudad",
-  "country": "País",
-  "description": "Descripción breve del evento en español (máx 200 caracteres)",
-  "lineup": ["Artista 1","Artista 2"],
-  "website": "URL oficial",
-  "ticketUrl": "URL para comprar entradas",
-  "price": "Precio aproximado o rango"
-}
-Si no encuentras el evento, devuelve: {"error": "No encontrado"}`;
-
-    const apiResp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': state.apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 1000,
-        system: systemPrompt,
-        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-        messages: [{ role: 'user', content: `Busca información sobre este evento musical: ${q}` }],
-      })
-    });
-
-    const data = await apiResp.json();
-
-    if(!apiResp.ok) {
-      const msg = data.error?.message || 'Error de API';
-      res.innerHTML = `<div class="card"><div style="color:var(--c);font-weight:700;margin-bottom:8px">❌ Error de conexión</div><div style="font-size:14px;color:var(--t2)">${msg}</div><div style="margin-top:12px;font-size:13px;color:var(--t3)">Comprueba tu clave API en ⚙️ Ajustes</div></div>`;
-      if(btn) btn.innerHTML = '✨ Buscar con IA';
-      return;
-    }
-
-    // Extract JSON from response
-    const fullText = (data.content || []).filter(b=>b.type==='text').map(b=>b.text).join('\n');
-    let clean = fullText.replace(/```json|```/g,'').trim();
-    // Find JSON object in text
-    const jsonMatch = clean.match(/\{[\s\S]*\}/);
-    if(!jsonMatch) throw new Error('Respuesta no es JSON');
-    const info = JSON.parse(jsonMatch[0]);
-
-    if(info.error) {
-      res.innerHTML = `<div class="card"><div style="text-align:center;padding:20px">
-        <div style="font-size:40px;margin-bottom:12px">🤔</div>
-        <div style="font-weight:800;font-size:18px;color:var(--ink);margin-bottom:8px">No encontrado</div>
-        <div style="color:var(--t2);font-size:15px;margin-bottom:20px">No encontré información sobre "<strong>${esc(q)}</strong>". Prueba con el nombre exacto o añádelo manualmente.</div>
-        <button class="btn-grad" onclick="prefillManual('${encodeURIComponent(q)}')">✏️ Añadir manualmente</button>
-      </div></div>`;
-    } else {
-      window._searchResult = info;
-      res.innerHTML = renderSearchResult(info);
-    }
-  } catch(e) {
-    res.innerHTML = `<div class="card"><div style="color:var(--c);font-weight:700;margin-bottom:8px">❌ Error</div><div style="font-size:14px;color:var(--t2)">${e.message}</div></div>`;
+    const info = await resolveEventInfo(q, province);
+    info.searchProvince = province;
+    window._searchResult = info;
+    res.innerHTML = renderSearchResult(info);
+  } catch (e) {
+    res.innerHTML = `<div class="card"><div style="text-align:center;padding:20px">
+      <div style="font-size:40px;margin-bottom:12px">🤔</div>
+      <div style="font-weight:800;font-size:18px;color:var(--ink);margin-bottom:8px">No pude resolver el evento</div>
+      <div style="color:var(--t2);font-size:15px;margin-bottom:20px">He intentado localizar información pública para <strong>${esc(q)}</strong>, pero no he obtenido un resultado fiable. Puedes pegar la URL oficial o añadirlo manualmente.</div>
+      <button class="btn-grad" onclick="prefillManual('${encodeURIComponent(q)}')">✏️ Añadir manualmente</button>
+    </div></div>`;
   }
-  if(btn) btn.innerHTML = '✨ Buscar con IA';
+  if (btn) btn.innerHTML = '🌐 Buscar sin API';
 }
 
 function renderSearchResult(info) {
@@ -631,6 +862,7 @@ function renderSearchResult(info) {
         ${lineupHtml}
         ${priceHtml}
         ${websiteHtml}
+        ${info.sourceUrl ? `<div style="margin-top:10px;font-size:12px;color:var(--t3)">Fuente detectada: ${esc(info.sourceUrl)}</div>` : ''}
         <div style="height:16px"></div>
         ${ticketHtml}
         <button class="btn-grad" onclick="addFromSearch()">➕ Añadir a mis eventos</button>
@@ -657,6 +889,9 @@ function addFromSearch() {
     lineup: info.lineup || [],
     website: info.website || '',
     ticketUrl: info.ticketUrl || '',
+    sourceUrl: info.sourceUrl || info.website || '',
+    searchProvince: info.searchProvince || '',
+    lastCheckedAt: info.lastCheckedAt || Date.now(),
     notes: '',
     expenses: [],
     attachments: [],
@@ -793,6 +1028,7 @@ function renderDetail() {
     <div class="sec-header"><div class="sec-title">🎤 Cartel</div></div>
     <div style="padding:0 16px 8px">${lineupHtml}</div>` : ''}
 
+    ${ev.sourceUrl ? `<div style="padding:10px 16px 0;font-size:12px;color:var(--t3)">Última revisión automática: ${new Date(ev.lastCheckedAt||Date.now()).toLocaleString('es-ES')}</div>` : ''}
     ${ev.website||ev.ticketUrl ? `
     <div style="padding:0 16px;display:flex;gap:8px;margin-bottom:8px">
       ${ev.ticketUrl?`<a href="${esc(ev.ticketUrl)}" target="_blank" class="btn-coral" style="flex:1;text-decoration:none">🎫 Entradas</a>`:''}
@@ -854,7 +1090,7 @@ function renderAddEdit() {
 
   return `
     <div style="padding:20px 16px 8px">
-      <button onclick="goTo(ev?'detail':'events')" style="color:var(--t2);font-size:15px;font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:4px" id="back-addEdit">← Volver</button>
+      <button onclick="goTo('events')" style="color:var(--t2);font-size:15px;font-weight:700;margin-bottom:12px;display:flex;align-items:center;gap:4px" id="back-addEdit">← Volver</button>
       <div style="font-family:'Fraunces',serif;font-size:28px;font-weight:900;color:var(--ink);margin-bottom:20px">${ev?'Editar evento':'Nuevo evento'}</div>
     </div>
     <div style="padding:0 16px 40px">
@@ -943,7 +1179,7 @@ function saveEvent(id) {
     if(i>-1) state.events[i] = {...state.events[i], ...data};
     save(); goTo('detail', id); showToast('✅ Cambios guardados');
   } else {
-    const ev = {id:uid(), ...data, notes:'', expenses:[], attachments:[], createdAt:Date.now()};
+    const ev = {id:uid(), ...data, sourceUrl:'', searchProvince:'', lastCheckedAt:Date.now(), notes:'', expenses:[], attachments:[], createdAt:Date.now()};
     state.events.push(ev);
     save(); goTo('detail', ev.id); showToast('✅ Evento añadido');
   }
@@ -1142,19 +1378,34 @@ function showSettings() {
     <div class="modal-title">Ajustes ⚙️</div>
     <div style="margin-bottom:20px"></div>
     <div class="settings-item">
-      <div class="settings-icon">🔑</div>
+      <div class="settings-icon">🌐</div>
       <div class="settings-info">
-        <div class="settings-name">Clave API Anthropic</div>
-        <div class="settings-sub">${state.apiKey ? '✅ Configurada — búsqueda IA activa' : '❌ Sin configurar — búsqueda IA desactivada'}</div>
+        <div class="settings-name">Búsqueda pública</div>
+        <div class="settings-sub">Sin API key. La app consulta páginas públicas y guarda caché local.</div>
       </div>
-      <button class="settings-action" onclick="closeModalForce();showApiKeyModal()">Cambiar</button>
     </div>
     <div class="settings-item">
-      <div class="settings-icon">📊</div>
+      <div class="settings-icon">💾</div>
       <div class="settings-info">
-        <div class="settings-name">Datos guardados</div>
+        <div class="settings-name">Datos guardados en este dispositivo</div>
         <div class="settings-sub">${state.events.length} eventos · ${state.events.reduce((s,e)=>(e.attachments||[]).length+s,0)} adjuntos</div>
       </div>
+    </div>
+    <div class="settings-item">
+      <div class="settings-icon">🔄</div>
+      <div class="settings-info">
+        <div class="settings-name">Actualizar próximos eventos</div>
+        <div class="settings-sub">Relee las fuentes oficiales almacenadas y refresca fecha, hora y enlaces.</div>
+      </div>
+      <button class="settings-action" onclick="closeModalForce();maybeAutoUpdateEvents(true)">Actualizar</button>
+    </div>
+    <div class="settings-item">
+      <div class="settings-icon">🧹</div>
+      <div class="settings-info">
+        <div class="settings-name">Vaciar caché de búsquedas</div>
+        <div class="settings-sub">Obliga a repetir las búsquedas públicas desde cero.</div>
+      </div>
+      <button class="settings-action" onclick="clearCache();closeModalForce();showToast('🧹 Caché vaciada')">Vaciar</button>
     </div>
     <div class="settings-item">
       <div class="settings-icon">🗑️</div>
@@ -1167,37 +1418,13 @@ function showSettings() {
     <div class="divider"></div>
     <div style="text-align:center;padding:8px 0">
       <div style="font-family:'Fraunces',serif;font-size:18px;font-weight:700;font-style:italic;color:var(--ink)">Gig<span style="color:var(--c)">Snap</span></div>
-      <div style="font-size:12px;color:var(--t3);margin-top:4px">by Nolodigas · v2.0</div>
+      <div style="font-size:12px;color:var(--t3);margin-top:4px">by Nolodigas · v2.1</div>
     </div>
   `, false);
 }
 
-function showApiKeyModal(callback) {
-  showModal(`
-    <div class="modal-handle"></div>
-    <div class="modal-title">🔑 Clave API</div>
-    <div class="modal-sub">La clave se guarda solo en tu dispositivo y sirve para que la búsqueda inteligente funcione.</div>
-    <div style="background:#EDE8FF;border-radius:10px;padding:12px 14px;margin-bottom:16px;font-size:14px;color:var(--v);font-weight:600">
-      ¿Sin clave? Obtenla gratis en <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:var(--v);font-weight:800;text-decoration:underline">console.anthropic.com</a> → API Keys → Create Key
-    </div>
-    <div class="field">
-      <label class="field-label">Tu clave API</label>
-      <input class="field-input" id="api-key-input" type="password" placeholder="sk-ant-…" value="${state.apiKey}" style="font-family:monospace">
-    </div>
-    <button class="btn-grad" onclick="saveApiKey(${callback?'true':'false'})">✅ Guardar clave</button>
-    <button onclick="closeModalForce()" style="width:100%;margin-top:10px;padding:12px;font-size:15px;font-weight:700;color:var(--t2)">Cancelar</button>
-  `, false);
-  window._apiCallback = callback;
-}
-
-function saveApiKey(doCallback) {
-  const key = document.getElementById('api-key-input')?.value?.trim();
-  if(!key) { showToast('⚠️ Introduce una clave','error'); return; }
-  state.apiKey = key;
-  save(); closeModalForce();
-  showToast('✅ Clave guardada');
-  if(doCallback && window._apiCallback) { window._apiCallback(); window._apiCallback=null; }
-}
+function showApiKeyModal() { showToast('ℹ️ Esta versión ya no necesita API key'); }
+function saveApiKey() { showToast('ℹ️ Esta versión ya no necesita API key'); }
 
 function confirmDelete(evId) {
   const ev = state.events.find(e=>e.id===evId);
@@ -1372,45 +1599,13 @@ document.addEventListener('click', e => {
 ═══════════════════════════════════════ */
 load();
 
-// Show onboarding if first time AND no API key
-if(!state.apiKey && state.events.length===0 && !localStorage.getItem('gigsnap_seen')) {
-  localStorage.setItem('gigsnap_seen','1');
-  document.getElementById('content').innerHTML = '';
-  // Show friendly API key setup after a brief moment
-  setTimeout(() => {
-    showModal(`
-      <div class="modal-handle"></div>
-      <div style="text-align:center;padding:10px 0 20px">
-        <div style="font-size:48px;margin-bottom:12px">🎸</div>
-        <div style="font-family:'Fraunces',serif;font-size:26px;font-weight:900;color:var(--ink);margin-bottom:8px">¡Bienvenido a GigSnap!</div>
-        <div style="font-size:15px;color:var(--t2);margin-bottom:20px;line-height:1.6">Para activar la búsqueda inteligente de conciertos necesitas una clave API de Anthropic.<br>Es gratis y solo se tarda 1 minuto.</div>
-        <div style="background:#EDE8FF;border-radius:12px;padding:14px;margin-bottom:20px;text-align:left">
-          <div style="font-size:13px;font-weight:800;color:var(--v);margin-bottom:6px">¿Cómo obtenerla?</div>
-          <div style="font-size:13px;color:var(--t2);line-height:1.7">1. Ve a <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:var(--v);font-weight:700">console.anthropic.com</a><br>2. Crea una cuenta gratuita<br>3. Entra en API Keys → Create Key<br>4. Pega la clave aquí abajo</div>
-        </div>
-        <div class="field" style="text-align:left">
-          <label class="field-label">Clave API (empieza por sk-ant-…)</label>
-          <input class="field-input" id="onboard-key" type="password" placeholder="sk-ant-api03-…" style="font-family:monospace">
-        </div>
-        <button class="btn-grad" onclick="saveOnboardKey()" style="margin-bottom:10px">✅ Activar búsqueda IA</button>
-        <button onclick="closeModalForce();render()" style="width:100%;padding:12px;font-size:14px;font-weight:700;color:var(--t2)">Ahora no, quizás luego</button>
-      </div>
-    `, false);
-  }, 400);
-}
-
-function saveOnboardKey() {
-  const key = document.getElementById('onboard-key')?.value?.trim();
-  if(!key) { showToast('⚠️ Introduce la clave','error'); return; }
-  state.apiKey = key; save(); closeModalForce(); render();
-  showToast('🎸 ¡Todo listo! Disfruta GigSnap');
-}
-
 // Initial render
 render();
+setTimeout(() => maybeAutoUpdateEvents(false), 1200);
+setInterval(() => maybeAutoUpdateEvents(false), AUTO_UPDATE_INTERVAL_MS);
 
 // Start countdown timer (updates home view)
-setInterval(()=>{ if(state.view==='home') startCountdown(); }, 100);
+setInterval(()=>{ if(state.view==='home') startCountdown(); }, 1000);
 </script>
 </body>
 </html>
