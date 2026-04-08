@@ -327,6 +327,7 @@ select.field-input{appearance:none;background-image:url("data:image/svg+xml,%3Cs
 <div id="modal-root"></div>
 
 <script>
+
 /* ═══════════════════════════════════════
    STATE & STORAGE
 ═══════════════════════════════════════ */
@@ -368,7 +369,7 @@ function clearCache() {
 const SEARCH_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const AUTO_UPDATE_INTERVAL_MS = 15 * 60 * 1000;
 const MONTHS = {ene:1,enero:1,jan:1,january:1,feb:2,febrero:2,february:2,mar:3,marzo:3,march:3,abr:4,abril:4,apr:4,april:4,may:5,mayo:5,jun:6,junio:6,june:6,jul:7,julio:7,july:7,ago:8,agosto:8,aug:8,august:8,sep:9,september:9,septiembre:9,setiembre:9,oct:10,octubre:10,october:10,nov:11,noviembre:11,november:11,dic:12,diciembre:12,dec:12,december:12};
-const SOURCE_HINTS = ['wegow','ticketmaster','dice.fm','feverup','songkick','bandsintown','entradas.com','lasttour','area12alicante','madcool','primaverasound','viagogo'];
+const SOURCE_HINTS = ['wegow','ticketmaster','dice.fm','feverup','songkick','bandsintown','entradas.com','lasttour','area12alicante','madcool','primaverasound','viagogo','notikumi','entradium','seetickets'];
 
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
 function fmt(dateStr) {
@@ -429,6 +430,7 @@ function decodeHtmlEntities(str) {
   t.innerHTML = str || '';
   return t.value;
 }
+
 function cleanFetchText(text) {
   return decodeHtmlEntities(String(text || ''))
     .replace(/\r/g, '')
@@ -436,8 +438,34 @@ function cleanFetchText(text) {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
+function cleanupMarkdownArtifacts(text) {
+  return cleanFetchText(String(text || ''))
+    .replace(/^URL Source:.*$/gim, '')
+    .replace(/^Markdown Content:.*$/gim, '')
+    .replace(/^Title:.*$/gim, '')
+    .replace(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g, ' ')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1')
+    .replace(/^\s*[*+-]\s*/gm, '')
+    .replace(/^>\s*/gm, '')
+    .replace(/^[#]{1,6}\s+/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+function cleanupCandidateLine(value) {
+  return String(value || '')
+    .replace(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g, ' ')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1')
+    .replace(/^\s*[*+-]\s*/, '')
+    .replace(/^#+\s*/, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+function isBadMetadataLine(value) {
+  const line = normalizeText(cleanupCandidateLine(value));
+  return !line || /^(url source|markdown content|title|image \d+|source|http|www\.)/.test(line);
+}
 const GENERIC_QUERY_WORDS = ['festival','festivales','concierto','conciertos','evento','eventos','entrada','entradas','abono','abonos','tickets','ticket','espana','españa','gira','tour','oficial','cartel','lineup','fechas','fecha'];
-const COMMON_CITY_HINTS = ['madrid','barcelona','valencia','sevilla','malaga','málaga','bilbao','alicante','murcia','zaragoza','granada','cordoba','córdoba','vigo','gijon','gijón','santander','pamplona','salamanca','valladolid','a coruna','a coruña','las palmas','oviedo','leon','león','almeria','almería','cadiz','cádiz','donostia','san sebastian','san sebastián','jaen','jaén','pozo alcon','pozo alcón'];
+const COMMON_CITY_HINTS = ['madrid','barcelona','valencia','sevilla','malaga','málaga','bilbao','alicante','murcia','zaragoza','granada','cordoba','córdoba','vigo','gijon','gijón','santander','pamplona','salamanca','valladolid','a coruna','a coruña','las palmas','oviedo','leon','león','almeria','almería','cadiz','cádiz','donostia','san sebastian','san sebastián','pozo alcon','pozo alcón','jaen','jaén'];
 function stripYears(value) {
   return String(value || '').replace(/\b20\d{2}\b/g, ' ').replace(/\s{2,}/g, ' ').trim();
 }
@@ -537,7 +565,7 @@ function extractLinks(text) {
   return dedupe(links.map(url => url.replace(/[)>.,]+$/, '')));
 }
 function looksLikeEventUrl(url) {
-  return /(event|events|festival|festivales|concierto|conciertos|agenda|programacion|programacion|tickets|entradas|tour|gig|cartel)/i.test(url);
+  return /(event|events|festival|festivales|concierto|conciertos|agenda|programacion|programación|tickets|entradas|tour|gig|cartel)/i.test(url);
 }
 function isSocialUrl(url) {
   return /(facebook|instagram|x\.com|twitter|youtube|tiktok|spotify)\./i.test(url);
@@ -549,12 +577,15 @@ function scoreUrl(url, query, province='') {
     if (s.includes(token)) score += 5;
   }
   for (const token of queryTokens(province)) {
-    if (s.includes(token)) score += 2;
+    if (s.includes(token)) score += 3;
   }
   if (looksLikeEventUrl(url)) score += 4;
+  if (/\.es(\/|$)/.test(url)) score += 2;
+  if (/spain|espana/.test(s)) score += 1;
   if (SOURCE_HINTS.some(h => s.includes(h))) score += 3;
-  if (isSocialUrl(url)) score -= 8;
+  if (/\/wp-content\//.test(s) || /\.(jpg|jpeg|png|gif|webp|svg|pdf)$/i.test(url)) score -= 12;
   if (/\/tag\//.test(s) || /\/category\//.test(s)) score -= 3;
+  if (isSocialUrl(url)) score -= 8;
   return score;
 }
 async function proxyFetchText(url) {
@@ -564,68 +595,71 @@ async function proxyFetchText(url) {
   if (!resp.ok) throw new Error(`No se pudo leer ${cleanUrl}`);
   return cleanFetchText(await resp.text());
 }
-async function fetchSearchResultText(query) {
-  const engines = [
-    `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
-    `https://www.bing.com/search?q=${encodeURIComponent(query)}`,
-  ];
-  const chunks = [];
-  for (const url of engines) {
-    try {
-      const txt = await proxyFetchText(url);
-      chunks.push(txt);
-    } catch (err) {
-      console.warn('GigSnap search engine skip', url, err);
-    }
-  }
-  return chunks.join('\n\n');
+async function fetchSearchResultText(query, fallback=false) {
+  const url = fallback
+    ? `https://www.bing.com/search?q=${encodeURIComponent(query)}`
+    : `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  return proxyFetchText(url);
 }
 function buildSearchQueries(query, province) {
   const base = stripYears(query);
+  const year = (String(query).match(/\b20\d{2}\b/) || [])[0] || '';
   return dedupe([
-    [query, province, 'oficial'].filter(Boolean).join(' '),
-    [query, province, 'entradas'].filter(Boolean).join(' '),
-    [base, province, 'festival'].filter(Boolean).join(' '),
-    [base, province, 'concierto'].filter(Boolean).join(' '),
-    [base, province].filter(Boolean).join(' '),
+    [query, province, 'espana', 'oficial'].filter(Boolean).join(' '),
+    [base, year, province, 'espana', 'entradas'].filter(Boolean).join(' '),
+    [base, province, 'espana'].filter(Boolean).join(' '),
   ]).filter(Boolean);
 }
 async function findCandidateUrls(query, province) {
   if (isUrl(query)) return [query.trim()];
   const urls = [...buildDirectCandidateUrls(query)];
-  for (const searchQuery of buildSearchQueries(query, province)) {
-    const searchText = await fetchSearchResultText(searchQuery);
-    urls.push(...extractLinks(searchText));
+  const queries = buildSearchQueries(query, province);
+  for (let i = 0; i < queries.length; i += 1) {
+    try {
+      const searchText = await fetchSearchResultText(queries[i], false);
+      urls.push(...extractLinks(searchText));
+      if (urls.length >= 6) break;
+    } catch (err) {
+      console.warn('GigSnap search engine skip', queries[i], err);
+    }
+  }
+  if (urls.length < 3) {
+    for (const q of queries.slice(0, 2)) {
+      try {
+        const searchText = await fetchSearchResultText(q, true);
+        urls.push(...extractLinks(searchText));
+      } catch (err) {
+        console.warn('GigSnap fallback search skip', q, err);
+      }
+    }
   }
   return dedupe(urls)
     .filter(url => /^https?:\/\//i.test(url))
     .filter(url => !/duckduckgo\.com|duck\.co|google\.|bing\.|yahoo\.|r\.jina\.ai/i.test(url))
     .sort((a, b) => scoreUrl(b, query, province) - scoreUrl(a, query, province))
-    .slice(0, 10);
+    .slice(0, 6);
 }
 function takeParagraphAfter(label, text) {
-  const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const lines = String(text || '').split('\n').map(l => cleanupCandidateLine(l)).filter(Boolean).filter(line => !isBadMetadataLine(line));
   const idx = lines.findIndex(line => normalizeText(line).includes(normalizeText(label)));
   if (idx === -1) return '';
   const out = [];
   for (const line of lines.slice(idx + 1)) {
-    if (/^###/.test(line) || /^##\s/.test(line)) break;
+    if (/^#{1,3}\s/.test(line)) break;
     out.push(line);
     if (out.length >= 2) break;
   }
   return out.join(' ').trim();
 }
 function takeLineMatch(text, regex) {
-  const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
-  const found = lines.find(line => regex.test(normalizeText(line)));
-  return found || '';
+  const lines = String(text || '').split('\n').map(l => cleanupCandidateLine(l)).filter(Boolean).filter(line => !isBadMetadataLine(line));
+  return lines.find(line => regex.test(normalizeText(line))) || '';
 }
 function extractAddress(text) {
-  const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  const lines = String(text || '').split('\n').map(l => cleanupCandidateLine(l)).filter(Boolean).filter(line => !isBadMetadataLine(line));
   const hit = lines.find(line => /(c\/|calle|avenida|avda\.?|plaza|paseo|carretera)/i.test(line) && /(\d{5}|,)/.test(line));
   if (hit) return hit;
-  const postal = lines.find(line => /\b\d{5}\b/.test(line) && /,/.test(line));
-  return postal || '';
+  return lines.find(line => /\b\d{5}\b/.test(line) && /,/.test(line)) || '';
 }
 function extractCity(address, text) {
   const src = normalizeText(`${address}\n${text}`);
@@ -641,29 +675,47 @@ function extractCity(address, text) {
   return '';
 }
 function cleanTitle(title, query, sourceUrl) {
-  let out = String(title || '').trim();
+  let out = cleanupCandidateLine(String(title || '')).trim();
   out = out.replace(/\s*[|·]\s*home$/i, '').trim();
   out = out.replace(/\s+-\s+inicio$/i, '').trim();
   const parts = out.split(/\s+-\s+/).map(p => p.trim()).filter(Boolean);
   if (parts.length === 2 && normalizeText(parts[0]) === normalizeText(parts[1])) out = parts[0];
-  if (!out || /^home$/i.test(out)) {
+  if (!out || /^home$/i.test(out) || /^image\s+\d+$/i.test(out)) {
     const host = (sourceUrl || '').replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0].split('.')[0];
     out = host.replace(/[-_]+/g, ' ');
   }
   if (queryTokens(out).length === 0) out = stripYears(query);
   return out.replace(/\b\w/g, c => c.toUpperCase());
 }
+function looksLikeArtistName(value) {
+  const clean = cleanupCandidateLine(value);
+  const norm = normalizeText(clean);
+  if (!clean || clean.length < 3 || clean.length > 70) return false;
+  if (isBadMetadataLine(clean)) return false;
+  if (/cartel|lineup|artists|artistas|festival|concierto|entrada|abono|ticket|programacion|programación|viernes|sabado|sábado|domingo|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|202\d/.test(norm)) return false;
+  if (/^[\d\W_]+$/.test(clean)) return false;
+  return /[a-záéíóúñ]/i.test(clean);
+}
 function buildLineup(name, text, type) {
-  const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
-  const labelLine = lines.find(line => /lineup|cartel|artists|artistas/i.test(line) && line.length < 240);
-  if (labelLine) {
-    const items = dedupe(labelLine.replace(/^(lineup|cartel|artists|artistas)[:\-]?/i, '').split(/[,·|]/).map(s => s.trim()).filter(s => s && s.length < 60 && !/^#+/.test(s) && !/cartel|lineup|artists|artistas|20\d{2}/i.test(s)));
-    if (items.length) return items;
+  const lines = String(text || '').split('\n').map(l => cleanupCandidateLine(l)).filter(Boolean).filter(line => !isBadMetadataLine(line));
+  const idx = lines.findIndex(line => /^(artistas|artists|lineup|cartel)(\s|$)/i.test(normalizeText(line)));
+  if (idx !== -1) {
+    const items = [];
+    for (const line of lines.slice(idx + 1, idx + 18)) {
+      const norm = normalizeText(line);
+      if (/^(abonos|entradas|tickets|horarios|schedule|programacion|programación)/.test(norm)) break;
+      for (const part of line.split(/[,;]|\s+\|\s+|\s+·\s+/).map(s => s.trim()).filter(Boolean)) {
+        if (looksLikeArtistName(part)) items.push(part);
+      }
+      if (items.length >= 12) break;
+    }
+    const picked = dedupe(items).slice(0, 12);
+    if (picked.length) return picked;
   }
   const fromNews = lines
-    .filter(line => /confirmad|take\s+\d+|suma a su cartel/i.test(line))
-    .flatMap(line => line.split(/[:·,&]/).map(s => s.trim()))
-    .filter(part => part && part.length > 3 && part.length < 60 && !/^#+/.test(part) && !/imagina|festival|cartel|noticia|grupo confirmado|202\d/i.test(normalizeText(part)));
+    .filter(line => /confirmad|grupo confirmado|suma a su cartel|se suma|nuevo artista|nueva confirmacion|nueva confirmación/i.test(normalizeText(line)))
+    .flatMap(line => line.split(/[:·,&]|\sy\s/).map(s => s.trim()))
+    .filter(part => looksLikeArtistName(part) && normalizeText(part) !== normalizeText(name));
   const picked = dedupe(fromNews).slice(0, 8);
   if (picked.length && type === 'festival') return picked;
   return type === 'festival' ? [] : [name].filter(Boolean);
@@ -671,14 +723,13 @@ function buildLineup(name, text, type) {
 function extractVenue(text, city) {
   const src = String(text || '');
   const direct = takeParagraphAfter('location', src) || takeParagraphAfter('recinto', src) || takeParagraphAfter('venue', src) || takeParagraphAfter('lugar', src);
-  if (direct) return direct;
+  if (direct && !/^ver mapa$/i.test(normalizeText(direct))) return direct;
   const norm = normalizeText(src);
   let m = norm.match(/se celebra en ([a-z\sáéíóúñ\-]{3,80})\s*\(([^)]+)\)/i);
   if (m) return m[1].trim().replace(/\b\w/g, c => c.toUpperCase());
-  m = norm.match(/se celebra en ([a-z\sáéíóúñ\-]{3,80})(?:\.|\n| el )/i);
-  if (m) return m[1].trim().replace(/\b\w/g, c => c.toUpperCase());
-  if (city) return city;
-  return '';
+  m = norm.match(/(?:recinto|lugar|venue)\s*:?\s*([a-z\sáéíóúñ\-]{3,80})(?:\.|\n|,)/i);
+  if (m && (!city || normalizeText(m[1].trim()) !== normalizeText(city))) return m[1].trim().replace(/\b\w/g, c => c.toUpperCase());
+  return city || '';
 }
 function guessType(name, query, url) {
   const src = slug(`${name} ${query} ${url}`);
@@ -688,6 +739,26 @@ function extractPrice(text) {
   const line = takeLineMatch(text, /(abonos|entradas|precio|desde|€)/i);
   const match = line.match(/(\d+[\.,]?\d*\s*€(?:\s*[-–a]\s*\d+[\.,]?\d*\s*€)?)/i);
   return match ? match[1].replace(/\s+/g, ' ').trim() : '';
+}
+function extractOfficialWebsite(sourceUrl, rawLinks) {
+  const links = dedupe([sourceUrl, ...(rawLinks || [])]).filter(Boolean);
+  const sourceHost = String(sourceUrl || '').replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
+  return links.find(url => {
+    const host = String(url).replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
+    if (!host || isSocialUrl(url)) return false;
+    if (host === sourceHost) return true;
+    return /\.es$|\.com$/.test(host) && !/(ticket|entrad|wegow|dice\.fm|ticketmaster|fever|bandsintown|songkick|viagogo)/i.test(host);
+  }) || sourceUrl;
+}
+function extractBestDescription(text, fallbackName='') {
+  const lines = String(text || '').split('\n').map(l => cleanupCandidateLine(l)).filter(Boolean).filter(line => !isBadMetadataLine(line));
+  const candidate = lines.find(line => {
+    const norm = normalizeText(line);
+    if (line.length < 40 || line.length > 260) return false;
+    if (fallbackName && normalizeText(line) === normalizeText(fallbackName)) return false;
+    return !/^(abonos|entradas|artistas|lineup|cartel|horarios|schedule|viernes|sabado|sábado|domingo|location|venue|recinto|lugar|precio)/.test(norm);
+  });
+  return (candidate || '').slice(0, 220);
 }
 function scoreResult(info, query, province='') {
   const haystack = slug(`${info.name} ${info.venue} ${info.city} ${info.description} ${info.sourceUrl}`);
@@ -709,24 +780,21 @@ function scoreResult(info, query, province='') {
   return score;
 }
 function parseEventText(text, sourceUrl, originalQuery) {
-  const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
-  const heading = (lines.find(line => line.startsWith('# ')) || '').replace(/^#\s+/, '');
-  const altTitle = lines.find(line => line.length > 4 && line.length < 90 && !/^https?:/i.test(line) && !/^(menu|home|close search|event details|time|location|inicio|apertura de puertas|entradas|abonos y entradas)$/i.test(normalizeText(line)));
-  const name = cleanTitle(heading || altTitle || originalQuery, originalQuery, sourceUrl);
+  const rawText = String(text || '');
+  const cleanText = cleanupMarkdownArtifacts(rawText);
+  const lines = cleanText.split('\n').map(l => cleanupCandidateLine(l)).filter(Boolean).filter(line => !isBadMetadataLine(line));
+  const heading = lines.find(line => line.length > 4 && line.length < 90 && !/^https?:/i.test(line) && !/^(menu|home|close search|event details|time|location|inicio|apertura de puertas|entradas|abonos y entradas)$/i.test(normalizeText(line)));
+  const name = cleanTitle(heading || originalQuery, originalQuery, sourceUrl);
   const type = guessType(name, originalQuery, sourceUrl);
-  const dateInfo = parseDateInfo(text);
-  const time = findTime(text, /(?:^|\n)(?:time|hora|inicio)[\s\S]{0,80}/i);
-  const doorsTime = findTime(text, /(?:apertura de puertas|doors)[\s\S]{0,60}/i);
-  const address = extractAddress(text);
-  const city = extractCity(address, text);
-  const venue = extractVenue(text, city);
-  const links = extractLinks(text).filter(url => !isSocialUrl(url));
+  const dateInfo = parseDateInfo(cleanText);
+  const time = findTime(cleanText, /(?:^|\n)(?:time|hora|inicio)[\s\S]{0,80}/i);
+  const doorsTime = findTime(cleanText, /(?:apertura de puertas|doors)[\s\S]{0,60}/i);
+  const address = extractAddress(cleanText);
+  const city = extractCity(address, cleanText);
+  const venue = extractVenue(cleanText, city);
+  const links = extractLinks(rawText).filter(url => !isSocialUrl(url));
   const sourceHost = (sourceUrl || '').replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
-  const ticketUrl = links.find(url => /ticket|entrad|abono|dice\.fm|wegow|ticketmaster|fever|lasttour/i.test(url)) || (/(abonos|entradas|tickets)/i.test(text) ? links.find(url => url.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0] !== sourceHost) || '' : '');
-  const website = sourceUrl;
-  const detail = takeParagraphAfter('event details', text) || takeParagraphAfter('descripcion', text) || takeParagraphAfter(name, text) || takeLineMatch(text, /vive el|festival|concierto/i);
-  const description = (detail || '').slice(0, 220);
-  const lineup = buildLineup(name, text, type);
+  const ticketUrl = links.find(url => /ticket|entrad|abono|dice\.fm|wegow|ticketmaster|fever|lasttour|notikumi|entradium|seetickets/i.test(url)) || (/(abonos|entradas|tickets)/i.test(cleanText) ? links.find(url => url.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0] !== sourceHost) || '' : '');
   return {
     name,
     type,
@@ -738,11 +806,11 @@ function parseEventText(text, sourceUrl, originalQuery) {
     address,
     city,
     country: 'España',
-    description,
-    lineup,
-    website,
+    description: extractBestDescription(cleanText, name),
+    lineup: buildLineup(name, cleanText, type),
+    website: extractOfficialWebsite(sourceUrl, links),
     ticketUrl,
-    price: extractPrice(text),
+    price: extractPrice(cleanText),
     sourceUrl,
     lastCheckedAt: Date.now(),
   };
@@ -754,17 +822,13 @@ async function resolveEventInfo(query, province='') {
   if (hit && Date.now() - hit.savedAt < SEARCH_CACHE_TTL_MS) return hit.data;
   const urls = await findCandidateUrls(query, province);
   if (!urls.length) throw new Error('No encontré resultados públicos reutilizables');
-  const candidates = [];
-  for (const url of urls.slice(0, 6)) {
-    try {
-      const pageText = await proxyFetchText(url);
-      const parsed = parseEventText(pageText, url, query);
-      parsed._score = scoreResult(parsed, query, province);
-      candidates.push(parsed);
-    } catch (err) {
-      console.warn('GigSnap search skip', url, err);
-    }
-  }
+  const settled = await Promise.allSettled(urls.slice(0, 4).map(async (url) => {
+    const pageText = await proxyFetchText(url);
+    const parsed = parseEventText(pageText, url, query);
+    parsed._score = scoreResult(parsed, query, province);
+    return parsed;
+  }));
+  const candidates = settled.filter(item => item.status === 'fulfilled').map(item => item.value);
   const best = candidates.sort((a, b) => b._score - a._score)[0];
   if (!best || (!best.name && !best.date && !best.venue)) throw new Error('No pude estructurar el evento');
   delete best._score;
@@ -890,7 +954,7 @@ function renderHome() {
       <button onclick="goTo('search')" style="background:white;border:1.5px solid rgba(86,41,255,.1);border-radius:16px;padding:18px;text-align:center;box-shadow:0 2px 12px rgba(86,41,255,.08)">
         <div style="font-size:28px">🔍</div>
         <div style="font-size:14px;font-weight:800;color:var(--ink);margin-top:6px">Buscar evento</div>
-        <div style="font-size:12px;color:var(--t3);margin-top:2px">Búsqueda web</div>
+        <div style="font-size:12px;color:var(--t3);margin-top:2px">España</div>
       </button>
       <button onclick="goTo('addEdit')" style="background:white;border:1.5px solid rgba(86,41,255,.1);border-radius:16px;padding:18px;text-align:center;box-shadow:0 2px 12px rgba(86,41,255,.08)">
         <div style="font-size:28px">✏️</div>
@@ -926,7 +990,7 @@ function renderSearch() {
   return `
     <div style="padding:20px 16px 8px">
       <div style="font-family:'Fraunces',serif;font-size:28px;font-weight:900;color:var(--ink);margin-bottom:4px">Buscar evento 🔍</div>
-      <div style="font-size:15px;color:var(--t2);margin-bottom:20px">Busca conciertos, festivales o pega la web oficial. GigSnap consulta páginas públicas, prioriza la fuente oficial y reutiliza esa referencia para futuras actualizaciones.</div>
+      <div style="font-size:15px;color:var(--t2);margin-bottom:20px">Busca conciertos y festivales en España o pega la web oficial. GigSnap prioriza resultados oficiales y acelera la búsqueda con caché local.</div>
       <div class="search-box" style="margin-bottom:12px">
         <input id="search-input" type="text" placeholder="Ej: The Black Crowes, Mad Cool, o pega la URL oficial" autocomplete="off" onkeydown="if(event.key==='Enter')doSearch()">
         <button onclick="doSearch()" style="font-size:22px">🔍</button>
@@ -938,7 +1002,7 @@ function renderSearch() {
         </select>
       </div>
       <button class="btn-grad" onclick="doSearch()">
-        <span id="search-btn-content">🌐 Buscar evento</span>
+        <span id="search-btn-content">🔎 Buscar evento</span>
       </button>
     </div>
     <div id="search-results" style="padding-top:8px"></div>
@@ -975,7 +1039,7 @@ async function doSearch() {
       <button class="btn-grad" onclick="prefillManual('${encodeURIComponent(q)}')">✏️ Añadir manualmente</button>
     </div></div>`;
   }
-  if (btn) btn.innerHTML = '🌐 Buscar evento';
+  if (btn) btn.innerHTML = '🔎 Buscar evento';
 }
 
 function renderSearchResult(info) {
@@ -1000,7 +1064,6 @@ function renderSearchResult(info) {
         ${lineupHtml}
         ${priceHtml}
         ${websiteHtml}
-        ${info.sourceUrl ? `<div style="margin-top:10px;font-size:12px;color:var(--t3)">Fuente detectada: ${esc(info.sourceUrl)}</div>` : ''}
         <div style="height:16px"></div>
         ${ticketHtml}
         <button class="btn-grad" onclick="addFromSearch()">➕ Añadir a mis eventos</button>
@@ -1744,6 +1807,7 @@ setInterval(() => maybeAutoUpdateEvents(false), AUTO_UPDATE_INTERVAL_MS);
 
 // Start countdown timer (updates home view)
 setInterval(()=>{ if(state.view==='home') startCountdown(); }, 1000);
+
 </script>
 </body>
 </html>
