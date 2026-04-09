@@ -779,119 +779,155 @@ function scoreResult(info, query, province='') {
   if (buildDirectCandidateUrls(query).some(url => info.sourceUrl === url)) score += 4;
   return score;
 }
+// ── JSON-LD EXTRACTOR ──────────────────────────────────────────────────────
 function extractJSONLD(html) {
-  const matches = [...html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)];
+  const matches = [...String(html).matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)];
   const results = [];
-
   for (const m of matches) {
     try {
       const json = JSON.parse(m[1].trim());
+      if (!json['@context'] || !String(json['@context']).includes('schema.org')) continue;
       if (Array.isArray(json)) results.push(...json);
       else results.push(json);
     } catch {}
   }
-
   return results;
 }
 
 function parseJSONLDEvent(data, sourceUrl) {
-  if (!data || !data["@type"]) return null;
-
-  const type = Array.isArray(data["@type"]) ? data["@type"] : [data["@type"]];
-  if (!type.some(t => /event/i.test(t))) return null;
-
+  if (!data || !data['@type']) return null;
+  const types = Array.isArray(data['@type']) ? data['@type'] : [data['@type']];
+  if (!types.some(t => /event/i.test(t))) return null;
   return {
-    name: data.name || "",
-    type: /festival/i.test(data.name || "") ? "festival" : "concierto",
-    date: data.startDate ? data.startDate.split("T")[0] : "",
-    dateEnd: data.endDate ? data.endDate.split("T")[0] : "",
-    time: data.startDate?.split("T")[1]?.slice(0,5) || "",
-    venue: data.location?.name || "",
-    city: data.location?.address?.addressLocality || "",
-    description: data.description || "",
-    lineup: data.performer ? [data.performer.name || data.performer] : [],
-    website: data.url || sourceUrl,
-    ticketUrl: data.offers?.url || "",
+    name:        data.name || '',
+    type:        /festival/i.test(data.name || '') ? 'festival' : 'concierto',
+    date:        data.startDate ? data.startDate.split('T')[0] : '',
+    dateEnd:     data.endDate   ? data.endDate.split('T')[0]   : '',
+    time:        data.startDate?.split('T')[1]?.slice(0, 5) || '',
+    doorsTime:   '',
+    venue:       data.location?.name || '',
+    address:     data.location?.address?.streetAddress || data.location?.address || '',
+    city:        data.location?.address?.addressLocality || '',
+    country:     data.location?.address?.addressCountry || 'España',
+    description: data.description || '',
+    lineup:      Array.isArray(data.performer)
+                   ? data.performer.map(p => p.name || String(p)).filter(Boolean)
+                   : data.performer ? [data.performer.name || String(data.performer)] : [],
+    website:     data.url || sourceUrl,
+    ticketUrl:   data.offers?.url || (Array.isArray(data.offers) ? data.offers[0]?.url : '') || '',
+    price:       data.offers?.price ? `${data.offers.price}${data.offers.priceCurrency ? ' ' + data.offers.priceCurrency : '€'}` : '',
     sourceUrl,
-    lastCheckedAt: Date.now()
-  };
-function extractJSONLD(html) {
-  const matches = [...html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)];
-  const results = [];
-
-  for (const m of matches) {
-    try {
-      const json = JSON.parse(m[1].trim());
-      if (!json['@context'] || !json['@context'].includes('schema.org')) continue;
-
-      if (Array.isArray(json)) results.push(...json);
-      else results.push(json);
-    } catch {}
-  }
-
-  return results;
-}
-
-function parseJSONLDEvent(data, sourceUrl) {
-  if (!data || !data["@type"]) return null;
-
-  const type = Array.isArray(data["@type"]) ? data["@type"] : [data["@type"]];
-  if (!type.some(t => /event/i.test(t))) return null;
-
-  return {
-    name: data.name || "",
-    type: /festival/i.test(data.name || "") ? "festival" : "concierto",
-    date: data.startDate ? data.startDate.split("T")[0] : "",
-    dateEnd: data.endDate ? data.endDate.split("T")[0] : "",
-    time: data.startDate?.split("T")[1]?.slice(0,5) || "",
-    venue: data.location?.name || "",
-    city: data.location?.address?.addressLocality || "",
-    description: data.description || "",
-    lineup: Array.isArray(data.performer)
-      ? data.performer.map(p => p.name || p)
-      : data.performer ? [data.performer.name || data.performer] : [],
-    website: data.url || sourceUrl,
-    ticketUrl: data.offers?.url || "",
-    sourceUrl,
-    lastCheckedAt: Date.now()
+    lastCheckedAt: Date.now(),
   };
 }
 
+// ── HYBRID PARSER (JSON-LD → heurístico completo) ──────────────────────────
 function parseEventText(text, sourceUrl, originalQuery) {
-
-  // 1️⃣ JSON-LD PRIORIDAD
-  const jsonld = extractJSONLD(text);
-  for (const obj of jsonld) {
-    const parsed = parseJSONLDEvent(obj, sourceUrl);
+  // 1️⃣ JSON-LD: estándar schema.org — máxima fiabilidad
+  const jsonldNodes = extractJSONLD(text);
+  for (const node of jsonldNodes) {
+    const parsed = parseJSONLDEvent(node, sourceUrl);
     if (parsed && parsed.name) return parsed;
   }
 
-  // 2️⃣ FALLBACK REAL (RECUPERADO)
-  const rawText = String(text || '');
+  // 2️⃣ Parser heurístico completo (original conservado íntegro)
+  const rawText  = String(text || '');
   const cleanText = cleanupMarkdownArtifacts(rawText);
-
+  const lines = cleanText.split('\n').map(l => cleanupCandidateLine(l)).filter(Boolean).filter(line => !isBadMetadataLine(line));
+  const heading = lines.find(line => line.length > 4 && line.length < 90 && !/^https?:/i.test(line) && !/^(menu|home|close search|event details|time|location|inicio|apertura de puertas|entradas|abonos y entradas)$/i.test(normalizeText(line)));
+  const name     = cleanTitle(heading || originalQuery, originalQuery, sourceUrl);
+  const type     = guessType(name, originalQuery, sourceUrl);
   const dateInfo = parseDateInfo(cleanText);
-  const venue = extractVenue(cleanText);
-  const city = extractCity('', cleanText);
-  const lineup = buildLineup(originalQuery, cleanText, guessType(originalQuery, originalQuery, sourceUrl));
-  const description = extractBestDescription(cleanText, originalQuery);
-  const links = extractLinks(cleanText);
-
+  const time      = findTime(cleanText, /(?:^|\n)(?:time|hora|inicio)[\s\S]{0,80}/i);
+  const doorsTime = findTime(cleanText, /(?:apertura de puertas|doors)[\s\S]{0,60}/i);
+  const address  = extractAddress(cleanText);
+  const city     = extractCity(address, cleanText);
+  const venue    = extractVenue(cleanText, city);
+  const links    = extractLinks(rawText).filter(url => !isSocialUrl(url));
+  const sourceHost = (sourceUrl || '').replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
+  const ticketUrl = links.find(url => /ticket|entrad|abono|dice\.fm|wegow|ticketmaster|fever|lasttour|notikumi|entradium|seetickets/i.test(url))
+    || (/(abonos|entradas|tickets)/i.test(cleanText) ? links.find(url => url.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0] !== sourceHost) || '' : '');
   return {
-    name: cleanTitle(originalQuery, originalQuery, sourceUrl),
-    type: guessType(originalQuery, originalQuery, sourceUrl),
-    date: dateInfo.date,
-    dateEnd: dateInfo.dateEnd,
-    time: findTime(cleanText),
+    name,
+    type,
+    date:        dateInfo.date,
+    dateEnd:     dateInfo.dateEnd,
+    time,
+    doorsTime,
     venue,
+    address,
     city,
-    description,
-    lineup,
-    website: extractOfficialWebsite(sourceUrl, links),
-    ticketUrl: links.find(l => /ticket|entradas|buy/i.test(l)) || '',
+    country:     'España',
+    description: extractBestDescription(cleanText, name),
+    lineup:      buildLineup(name, cleanText, type),
+    website:     extractOfficialWebsite(sourceUrl, links),
+    ticketUrl,
+    price:       extractPrice(cleanText),
     sourceUrl,
-    lastCheckedAt: Date.now()
+    lastCheckedAt: Date.now(),
   };
+}
+async function resolveEventInfo(query, province='') {
+  const key = cacheKey(query, province);
+  const cache = getCache();
+  const hit = cache[key];
+  if (hit && Date.now() - hit.savedAt < SEARCH_CACHE_TTL_MS) return hit.data;
+  const urls = await findCandidateUrls(query, province);
+  if (!urls.length) throw new Error('No encontré resultados públicos reutilizables');
+  const settled = await Promise.allSettled(urls.slice(0, 4).map(async (url) => {
+    const pageText = await proxyFetchText(url);
+    const parsed = parseEventText(pageText, url, query);
+    parsed._score = scoreResult(parsed, query, province);
+    return parsed;
+  }));
+  const candidates = settled.filter(item => item.status === 'fulfilled').map(item => item.value);
+  const best = candidates.sort((a, b) => b._score - a._score)[0];
+  if (!best || (!best.name && !best.date && !best.venue)) throw new Error('No pude estructurar el evento');
+  delete best._score;
+  cache[key] = { savedAt: Date.now(), data: best };
+  saveCache(cache);
+  return best;
+}
+async function maybeAutoUpdateEvents(force=false) {
+  if (state.updating) return;
+  const pending = state.events.filter(ev => (ev.sourceUrl || ev.website) && (!ev.lastCheckedAt || force || Date.now() - ev.lastCheckedAt > SEARCH_CACHE_TTL_MS));
+  if (!pending.length) return;
+  state.updating = true;
+  let updated = 0;
+  for (const ev of pending.slice(0, 5)) {
+    try {
+      const fresh = await resolveEventInfo(ev.sourceUrl || ev.website || ev.name, ev.searchProvince || '');
+      const merged = {
+        ...ev,
+        date: fresh.date || ev.date,
+        dateEnd: fresh.dateEnd || ev.dateEnd,
+        time: fresh.time || ev.time,
+        doorsTime: fresh.doorsTime || ev.doorsTime,
+        venue: fresh.venue || ev.venue,
+        address: fresh.address || ev.address,
+        city: fresh.city || ev.city,
+        description: fresh.description || ev.description,
+        lineup: fresh.lineup?.length ? fresh.lineup : ev.lineup,
+        website: fresh.website || ev.website,
+        ticketUrl: fresh.ticketUrl || ev.ticketUrl,
+        price: fresh.price || ev.price,
+        sourceUrl: fresh.sourceUrl || ev.sourceUrl,
+        lastCheckedAt: Date.now(),
+      };
+      if (JSON.stringify(merged) !== JSON.stringify(ev)) {
+        Object.assign(ev, merged);
+        updated += 1;
+      } else {
+        ev.lastCheckedAt = Date.now();
+      }
+    } catch (err) {
+      ev.lastCheckedAt = Date.now();
+    }
+  }
+  save();
+  state.updating = false;
+  if (updated) showToast(`🔄 ${updated} evento(s) actualizado(s)`);
+  if (state.view === 'detail' || state.view === 'events' || state.view === 'home') render();
 }
 /* ═══════════════════════════════════════
    NAVIGATION
@@ -1213,7 +1249,7 @@ function renderDetail() {
     ).join('') : '';
 
   const daysLeft = getDaysUntil(ev.date);
-  const shareText = encodeURIComponent(`🎵 ${ev.name}\n📅 ${fmt(ev.date)}${ev.time?' · '+ev.time:''}\n📍 ${ev.venue||ev.city||''}\n\nOrganizado con GigSnap 🎸`);
+  const shareText = encodeURIComponent(`🎵 ${ev.name}\n📅 ${fmt(ev.date)}${ev.time?' · '+ev.time:''}\n📍 ${ev.venue||ev.city||''}${ev.website||ev.ticketUrl?'\n🔗 '+(ev.website||ev.ticketUrl):''}\n\nOrganizado con GigSnap 🎸`);
 
   return `
     <!-- Header gradient -->
