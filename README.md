@@ -1,82 +1,50 @@
 # GigSnap 🎸 · by Nolodigas
 
-Aplicación web estática para buscar conciertos y festivales en España, guardar entradas, controlar gastos y mantener los datos actualizados desde el propio navegador.
+**[→ Abrir app](https://nolodigas.github.io/gigsnap)**
 
-## v2.4 — Cambios auditados
-
-### 🔎 Parser híbrido (JSON-LD → heurístico)
-- `extractJSONLD`: extrae bloques `application/ld+json` filtrando por schema.org
-- `parseJSONLDEvent`: soporta `performer` como array (crítico para festivales)
-- Si JSON-LD no devuelve datos útiles, activa el parser heurístico original íntegro
-- Se conservan todos los campos: `doorsTime`, `address`, `price`, `country`
-
-### 📱 WhatsApp — fix enlace
-El mensaje compartido ahora incluye la URL oficial del evento o de entradas.
+Tu agenda musical inteligente — busca conciertos y festivales en España, guarda entradas, controla gastos y compártelo todo con tus amigos.
 
 ---
 
-## Mejoras anteriores (v2.3)
+## Qué puedes hacer
 
-- Búsqueda afinada para conciertos y festivales en España.
-- Prioridad reforzada a webs oficiales y páginas de entradas relevantes.
-- Limpieza de metadatos Markdown para evitar texto basura en artistas, descripción o enlaces.
-- Búsqueda más rápida con menos consultas, candidatos mejor filtrados y caché local.
-- Actualización automática de eventos guardados reutilizando la fuente pública detectada.
-- Datos guardados en el propio dispositivo del usuario.
+- **Buscar con IA** — escribe el nombre del evento y GigSnap obtiene fecha, lugar, artistas, precio y enlace de entradas directamente de la web oficial
+- **Pegar URL directamente** — si tienes el enlace oficial, pégalo en el buscador y extrae todos los datos automáticamente
+- **Gestionar tus eventos** — próximos, vividos, con cuenta atrás en tiempo real
+- **Adjuntar entradas** — foto, PDF o Apple Wallet (.pkpass) · hasta 5 archivos por evento
+- **Controlar gastos** por categoría: entrada, alojamiento, transporte, comida, merch y otros
+- **Compartir por WhatsApp** con fecha, lugar, artistas y enlace de entradas en un solo mensaje
+- **Exportar al calendario** en formato .ics (Google Calendar, Apple Calendar, Outlook)
+- **Ver resumen global** de todos tus gastos musicales con gráfico por categoría y evento
+
+---
 
 ## Cómo funciona la búsqueda
 
-1. El usuario escribe el nombre del evento, añade una provincia opcional o pega la URL oficial.
-2. GigSnap prioriza dominios que encajan con el evento y resultados públicos en España.
-3. Extrae y normaliza:
-   - nombre
-   - tipo de evento
-   - fecha y fecha fin
-   - hora y apertura de puertas
-   - recinto
-   - ciudad
-   - descripción
-   - artistas
-   - web oficial
-   - enlace de entradas
-4. La referencia detectada se reutiliza para futuras actualizaciones automáticas.
+1. Escribe el nombre del evento o pega la URL oficial
+2. La app prioriza la web oficial del evento y sus páginas de entradas
+3. Extrae y normaliza: nombre, tipo, fecha, hora, puertas, recinto, ciudad, descripción, artistas, web y enlace de entradas
+4. La fuente detectada se reutiliza para actualizaciones automáticas futuras
 
-## Almacenamiento local
+El parser funciona en dos capas:
+- **JSON-LD** (schema.org) — cuando la web del evento lo incluye, extracción directa y fiable
+- **Heurístico** — para el resto de webs, análisis inteligente del contenido
 
-GigSnap guarda en el navegador del dispositivo:
+---
 
-- eventos
-- gastos
-- notas
-- adjuntos en base64
-- caché de búsquedas
-- fuente pública asociada a cada evento
+## Almacenamiento
 
-Claves usadas:
+Todo se guarda en tu dispositivo, nunca en un servidor externo:
+- Eventos, gastos, notas y archivos adjuntos
+- Caché de búsquedas (evita repetir consultas)
+- Clave API (solo en tu dispositivo)
 
-- `gigsnap_events`
-- `gigsnap_search_cache`
+---
 
-## Actualización automática
+## Actualización automática de eventos
 
-- La app revisa los próximos eventos al abrirse.
-- Mientras la página siga abierta, vuelve a comprobarlos periódicamente.
-- También puede forzarse desde **Ajustes → Actualizar**.
+La app revisa los eventos próximos al abrirse y mientras permanece abierta. También puede forzarse desde **Ajustes → Actualizar**.
 
-## Publicación en GitHub Pages
+---
 
-1. Sube `index.html` y `README.md` al repositorio.
-2. Ve a **Settings → Pages**.
-3. Selecciona la rama principal.
-4. Publica.
-
-## Limitaciones reales
-
-- Depende de que exista una página pública legible del evento.
-- Algunas webs pueden cambiar su estructura y requerir ajustes futuros.
-- La actualización automática solo ocurre mientras la app está abierta.
-- `localStorage` tiene límite de espacio, por lo que no conviene acumular demasiados adjuntos pesados.
-
-## Versión
-
-**v2.4**
+*GigSnap · by Nolodigas · v2.4*

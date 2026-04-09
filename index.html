@@ -443,8 +443,14 @@ function cleanupMarkdownArtifacts(text) {
     .replace(/^URL Source:.*$/gim, '')
     .replace(/^Markdown Content:.*$/gim, '')
     .replace(/^Title:.*$/gim, '')
+    // strip image markdown
     .replace(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g, ' ')
+    // strip empty-bracket links [](url) — Elementor off-canvas, etc.
+    .replace(/\[\]\((https?:\/\/[^)]+)\)/g, ' ')
+    // strip named links, keep only text
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1')
+    // strip bare Elementor junk URLs
+    .replace(/https?:\/\/\S*(?:elementor|off_canvas|canvas)[^)\s]*/gi, ' ')
     .replace(/^\s*[*+-]\s*/gm, '')
     .replace(/^>\s*/gm, '')
     .replace(/^[#]{1,6}\s+/gm, '')
@@ -454,7 +460,9 @@ function cleanupMarkdownArtifacts(text) {
 function cleanupCandidateLine(value) {
   return String(value || '')
     .replace(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g, ' ')
+    .replace(/\[\]\((https?:\/\/[^)]+)\)/g, ' ')
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1')
+    .replace(/https?:\/\/\S*(?:elementor|off_canvas|canvas)[^)\s]*/gi, ' ')
     .replace(/^\s*[*+-]\s*/, '')
     .replace(/^#+\s*/, '')
     .replace(/\s{2,}/g, ' ')
@@ -692,6 +700,8 @@ function looksLikeArtistName(value) {
   const norm = normalizeText(clean);
   if (!clean || clean.length < 3 || clean.length > 70) return false;
   if (isBadMetadataLine(clean)) return false;
+  // Bloquear ítems de menú de navegación web que se cuelan como artistas
+  if (/^(ubicacion|ubicación|galeria|galería|info|informacion|información|turismo|contacto|inicio|home|menu|menú|tienda|shop|acceso|accesos|mapa|ver mapa|comprar|reservar|programa|horario|patrocinadores|colaboradores|prensa|legal|aviso|cookies|politica|privacidad|siguenos|newsletter|suscribete|volver|cerrar|close|back|next|prev|anterior|siguiente)$/.test(norm)) return false;
   if (/cartel|lineup|artists|artistas|festival|concierto|entrada|abono|ticket|programacion|programación|viernes|sabado|sábado|domingo|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|202\d/.test(norm)) return false;
   if (/^[\d\W_]+$/.test(clean)) return false;
   return /[a-záéíóúñ]/i.test(clean);
@@ -793,76 +803,68 @@ function extractJSONLD(html) {
   }
   return results;
 }
-
 function parseJSONLDEvent(data, sourceUrl) {
   if (!data || !data['@type']) return null;
   const types = Array.isArray(data['@type']) ? data['@type'] : [data['@type']];
   if (!types.some(t => /event/i.test(t))) return null;
+  const offerUrl = Array.isArray(data.offers) ? (data.offers[0]?.url||'') : (data.offers?.url||'');
+  const offerPrice = Array.isArray(data.offers) ? (data.offers[0]?.price||'') : (data.offers?.price||'');
+  const offerCur   = Array.isArray(data.offers) ? (data.offers[0]?.priceCurrency||'€') : (data.offers?.priceCurrency||'€');
   return {
     name:        data.name || '',
-    type:        /festival/i.test(data.name || '') ? 'festival' : 'concierto',
+    type:        /festival/i.test(data.name||'') ? 'festival' : 'concierto',
     date:        data.startDate ? data.startDate.split('T')[0] : '',
     dateEnd:     data.endDate   ? data.endDate.split('T')[0]   : '',
-    time:        data.startDate?.split('T')[1]?.slice(0, 5) || '',
+    time:        data.startDate?.split('T')[1]?.slice(0,5) || '',
     doorsTime:   '',
     venue:       data.location?.name || '',
-    address:     data.location?.address?.streetAddress || data.location?.address || '',
+    address:     data.location?.address?.streetAddress || (typeof data.location?.address==='string'?data.location.address:''),
     city:        data.location?.address?.addressLocality || '',
-    country:     data.location?.address?.addressCountry || 'España',
+    country:     data.location?.address?.addressCountry  || 'España',
     description: data.description || '',
     lineup:      Array.isArray(data.performer)
-                   ? data.performer.map(p => p.name || String(p)).filter(Boolean)
-                   : data.performer ? [data.performer.name || String(data.performer)] : [],
+                   ? data.performer.map(p=>p.name||String(p)).filter(Boolean)
+                   : data.performer ? [data.performer.name||String(data.performer)] : [],
     website:     data.url || sourceUrl,
-    ticketUrl:   data.offers?.url || (Array.isArray(data.offers) ? data.offers[0]?.url : '') || '',
-    price:       data.offers?.price ? `${data.offers.price}${data.offers.priceCurrency ? ' ' + data.offers.priceCurrency : '€'}` : '',
+    ticketUrl:   offerUrl,
+    price:       offerPrice ? `${offerPrice} ${offerCur}` : '',
     sourceUrl,
     lastCheckedAt: Date.now(),
   };
 }
-
-// ── HYBRID PARSER (JSON-LD → heurístico completo) ──────────────────────────
+// ── HYBRID PARSER ──────────────────────────────────────────────────────────
 function parseEventText(text, sourceUrl, originalQuery) {
-  // 1️⃣ JSON-LD: estándar schema.org — máxima fiabilidad
-  const jsonldNodes = extractJSONLD(text);
-  for (const node of jsonldNodes) {
+  // 1️⃣ JSON-LD (schema.org) — máxima fiabilidad
+  for (const node of extractJSONLD(text)) {
     const parsed = parseJSONLDEvent(node, sourceUrl);
     if (parsed && parsed.name) return parsed;
   }
-
-  // 2️⃣ Parser heurístico completo (original conservado íntegro)
-  const rawText  = String(text || '');
+  // 2️⃣ Heurístico completo (fallback)
+  const rawText = String(text || '');
   const cleanText = cleanupMarkdownArtifacts(rawText);
   const lines = cleanText.split('\n').map(l => cleanupCandidateLine(l)).filter(Boolean).filter(line => !isBadMetadataLine(line));
   const heading = lines.find(line => line.length > 4 && line.length < 90 && !/^https?:/i.test(line) && !/^(menu|home|close search|event details|time|location|inicio|apertura de puertas|entradas|abonos y entradas)$/i.test(normalizeText(line)));
-  const name     = cleanTitle(heading || originalQuery, originalQuery, sourceUrl);
-  const type     = guessType(name, originalQuery, sourceUrl);
+  const name = cleanTitle(heading || originalQuery, originalQuery, sourceUrl);
+  const type = guessType(name, originalQuery, sourceUrl);
   const dateInfo = parseDateInfo(cleanText);
-  const time      = findTime(cleanText, /(?:^|\n)(?:time|hora|inicio)[\s\S]{0,80}/i);
+  const time = findTime(cleanText, /(?:^|\n)(?:time|hora|inicio)[\s\S]{0,80}/i);
   const doorsTime = findTime(cleanText, /(?:apertura de puertas|doors)[\s\S]{0,60}/i);
-  const address  = extractAddress(cleanText);
-  const city     = extractCity(address, cleanText);
-  const venue    = extractVenue(cleanText, city);
-  const links    = extractLinks(rawText).filter(url => !isSocialUrl(url));
+  const address = extractAddress(cleanText);
+  const city = extractCity(address, cleanText);
+  const venue = extractVenue(cleanText, city);
+  const links = extractLinks(rawText).filter(url => !isSocialUrl(url));
   const sourceHost = (sourceUrl || '').replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
-  const ticketUrl = links.find(url => /ticket|entrad|abono|dice\.fm|wegow|ticketmaster|fever|lasttour|notikumi|entradium|seetickets/i.test(url))
-    || (/(abonos|entradas|tickets)/i.test(cleanText) ? links.find(url => url.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0] !== sourceHost) || '' : '');
+  const ticketUrl = links.find(url => /ticket|entrad|abono|dice\.fm|wegow|ticketmaster|fever|lasttour|notikumi|entradium|seetickets/i.test(url)) || (/(abonos|entradas|tickets)/i.test(cleanText) ? links.find(url => url.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0] !== sourceHost) || '' : '');
   return {
-    name,
-    type,
-    date:        dateInfo.date,
-    dateEnd:     dateInfo.dateEnd,
-    time,
-    doorsTime,
-    venue,
-    address,
-    city,
-    country:     'España',
+    name, type,
+    date: dateInfo.date, dateEnd: dateInfo.dateEnd,
+    time, doorsTime, venue, address, city,
+    country: 'España',
     description: extractBestDescription(cleanText, name),
-    lineup:      buildLineup(name, cleanText, type),
-    website:     extractOfficialWebsite(sourceUrl, links),
+    lineup: buildLineup(name, cleanText, type),
+    website: extractOfficialWebsite(sourceUrl, links),
     ticketUrl,
-    price:       extractPrice(cleanText),
+    price: extractPrice(cleanText),
     sourceUrl,
     lastCheckedAt: Date.now(),
   };
@@ -1243,13 +1245,18 @@ function renderDetail() {
       </div>`).join('') : `<div style="text-align:center;padding:20px;color:var(--t3);font-size:14px">Sin gastos registrados todavía</div>`;
 
   const attHtml = (ev.attachments||[]).length > 0
-    ? ev.attachments.map((att,i) => att.type.startsWith('image/')
-      ? `<div class="attachment"><img src="${att.data}" class="att-thumb" onclick="viewImage('${att.data}')" style="cursor:pointer"><div class="att-info"><div class="att-name">${esc(att.name)}</div><div class="att-size">${(att.size/1024).toFixed(0)} KB · Toca para ver</div></div><button class="att-del" onclick="deleteAttachment('${ev.id}',${i})">🗑️</button></div>`
-      : `<div class="attachment"><div class="att-pdf">📄</div><div class="att-info"><div class="att-name">${esc(att.name)}</div><div class="att-size">${(att.size/1024).toFixed(0)} KB · PDF</div></div><button onclick="viewPdf('${att.data}')" style="color:var(--v);font-weight:700;font-size:13px;padding:4px 8px">Ver</button><button class="att-del" onclick="deleteAttachment('${ev.id}',${i})">🗑️</button></div>`
-    ).join('') : '';
+    ? ev.attachments.map((att,i) => {
+        const isImg    = att.type.startsWith('image/');
+        const isWallet = att.type === 'application/vnd.apple.pkpass' || att.name?.endsWith('.pkpass');
+        if (isImg) return `<div class="attachment"><img src="${att.data}" class="att-thumb" onclick="viewImage('${att.data}')" style="cursor:pointer"><div class="att-info"><div class="att-name">${esc(att.name)}</div><div class="att-size">${(att.size/1024).toFixed(0)} KB · Toca para ver</div></div><button class="att-del" onclick="deleteAttachment('${ev.id}',${i})">🗑️</button></div>`;
+        if (isWallet) return `<div class="attachment"><div class="att-pdf" style="background:linear-gradient(135deg,#2c7be5,#1abc9c)">🎟️</div><div class="att-info"><div class="att-name">${esc(att.name)}</div><div class="att-size">${(att.size/1024).toFixed(0)} KB · Apple Wallet</div></div><button onclick="downloadAtt('${att.data}','${esc(att.name)}')" style="color:var(--v);font-weight:700;font-size:13px;padding:4px 8px">Añadir</button><button class="att-del" onclick="deleteAttachment('${ev.id}',${i})">🗑️</button></div>`;
+        return `<div class="attachment"><div class="att-pdf">📄</div><div class="att-info"><div class="att-name">${esc(att.name)}</div><div class="att-size">${(att.size/1024).toFixed(0)} KB · PDF</div></div><button onclick="openPdf('${att.data}','${esc(att.name)}')" style="color:var(--v);font-weight:700;font-size:13px;padding:4px 8px">Ver</button><button class="att-del" onclick="deleteAttachment('${ev.id}',${i})">🗑️</button></div>`;
+      }).join('') : '';
 
   const daysLeft = getDaysUntil(ev.date);
-  const shareText = encodeURIComponent(`🎵 ${ev.name}\n📅 ${fmt(ev.date)}${ev.time?' · '+ev.time:''}\n📍 ${ev.venue||ev.city||''}${ev.website||ev.ticketUrl?'\n🔗 '+(ev.website||ev.ticketUrl):''}\n\nOrganizado con GigSnap 🎸`);
+  const topArtists = (ev.lineup||[]).slice(0,5).join(' · ');
+  const ticketLine = ev.ticketUrl ? `\n🎫 Entradas: ${ev.ticketUrl}` : (ev.website ? `\n🌐 ${ev.website}` : '');
+  const shareText = encodeURIComponent(`🎵 ${ev.name}\n📅 ${fmt(ev.date)}${ev.time?' · '+ev.time:''}${ev.doorsTime?' (puertas: '+ev.doorsTime+')':''}\n📍 ${ev.venue||ev.city||''}${topArtists?'\n🎤 '+topArtists:''}${ticketLine}\n\n📲 Organizado con GigSnap by Nolodigas`);
 
   return `
     <!-- Header gradient -->
@@ -1309,10 +1316,10 @@ function renderDetail() {
     </div>
     <div style="padding:0 16px 8px">
       <div class="upload-zone" onclick="document.getElementById('file-input-${ev.id}').click()" id="dropzone-${ev.id}">
-        <input type="file" id="file-input-${ev.id}" accept="image/*,.pdf" onchange="handleFile('${ev.id}',this)">
+        <input type="file" id="file-input-${ev.id}" accept="image/*,.pdf,application/pdf,application/vnd.apple.pkpass,.pkpass" onchange="handleFile('${ev.id}',this)" style="display:none">
         <div class="upload-icon">📎</div>
         <div class="upload-text">Toca para adjuntar tu entrada</div>
-        <div class="upload-hint">Imagen o PDF · Máx 3 MB</div>
+        <div class="upload-hint">Foto · PDF · Apple Wallet (.pkpass) · Máx 5 MB</div>
       </div>
       ${attHtml}
     </div>
@@ -1620,8 +1627,42 @@ function viewImage(src) {
       <img src="${src}" style="max-width:90vw;max-height:85vh;border-radius:16px;object-fit:contain" onclick="event.stopPropagation()">
     </div>`;
 }
-function viewPdf(data) {
-  const w=window.open(); w.document.write(`<html><body style="margin:0"><embed src="${data}" type="application/pdf" width="100%" height="100%"></body></html>`); w.document.close();
+function viewImage(src) {
+  document.getElementById('modal-root').innerHTML=`
+    <div class="modal-overlay center" onclick="closeModalForce()">
+      <img src="${src}" style="max-width:90vw;max-height:85vh;border-radius:16px;object-fit:contain" onclick="event.stopPropagation()">
+    </div>`;
+}
+// Mobile-safe PDF opener: intenta <embed>, si falla descarga
+function openPdf(data, name) {
+  try {
+    // En iOS Safari <embed> no funciona, usamos <object> + fallback a descarga
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay center';
+    modal.style.zIndex = '300';
+    modal.innerHTML = `
+      <div style="background:white;border-radius:16px;width:92vw;max-width:460px;max-height:90vh;overflow:hidden;display:flex;flex-direction:column">
+        <div style="padding:14px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #F0EEF8">
+          <span style="font-weight:800;font-size:15px;color:var(--ink)">${name||'Documento'}</span>
+          <div style="display:flex;gap:8px">
+            <button onclick="downloadAtt('${data}','${name}')" style="font-size:13px;font-weight:700;color:var(--v);padding:6px 12px;border-radius:8px;background:var(--p)">⬇️ Descargar</button>
+            <button onclick="this.closest('.modal-overlay').remove()" style="font-size:20px;color:var(--t3);padding:4px 8px">✕</button>
+          </div>
+        </div>
+        <iframe src="${data}" style="flex:1;min-height:70vh;border:none" title="PDF"></iframe>
+      </div>`;
+    modal.addEventListener('click', e => { if(e.target===modal) modal.remove(); });
+    document.body.appendChild(modal);
+  } catch(e) {
+    downloadAtt(data, name);
+  }
+}
+// Descarga genérica (PDF, pkpass, etc.)
+function downloadAtt(data, name) {
+  const a = document.createElement('a');
+  a.href = data;
+  a.download = name || 'archivo';
+  a.click();
 }
 
 // Settings modal
@@ -1716,16 +1757,19 @@ function clearAll() {
 ═══════════════════════════════════════ */
 function handleFile(evId, input) {
   const file = input.files[0]; if(!file) return;
-  if(file.size > 3*1024*1024) { showToast('⚠️ Máximo 3 MB por archivo','error'); return; }
+  if(file.size > 5*1024*1024) { showToast('⚠️ Máximo 5 MB por archivo','error'); return; }
+  // Normalizar tipo para .pkpass que algunos navegadores móviles entregan como octet-stream
+  const fileType = (file.name.endsWith('.pkpass') ? 'application/vnd.apple.pkpass' : file.type) || 'application/octet-stream';
   const reader = new FileReader();
   reader.onload = e => {
     const ev = state.events.find(ev=>ev.id===evId);
     if(!ev) return;
     ev.attachments = ev.attachments||[];
     if(ev.attachments.length>=5) { showToast('⚠️ Máximo 5 archivos por evento','error'); return; }
-    ev.attachments.push({name:file.name, type:file.type, size:file.size, data:e.target.result});
+    ev.attachments.push({name:file.name, type:fileType, size:file.size, data:e.target.result});
     save(); goTo('detail', evId); showToast('📎 Archivo adjuntado');
   };
+  reader.onerror = () => showToast('❌ Error al leer el archivo','error');
   reader.readAsDataURL(file);
 }
 
