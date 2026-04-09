@@ -1,6 +1,6 @@
 # GigSnap 🎸 · by Nolodigas
 
-**[→ Abrir app](https://nolodigas.github.io/gigsnap)**
+**[→ Abrir app](https://nolodigas.github.io/GigSnap)**
 
 Tu agenda musical inteligente — busca conciertos y festivales en España, guarda entradas, controla gastos y compártelo todo con tus amigos.
 
@@ -37,7 +37,7 @@ El parser funciona en dos capas:
 Todo se guarda en tu dispositivo, nunca en un servidor externo:
 - Eventos, gastos, notas y archivos adjuntos
 - Caché de búsquedas (evita repetir consultas)
-- Clave API (solo en tu dispositivo)
+- Clave API (solo en tu dispositivo) crea un Marcador en tu navegador para no perder la memoria
 
 ---
 
