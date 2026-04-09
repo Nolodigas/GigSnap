@@ -67,9 +67,9 @@ input,textarea,select{font-family:inherit}
   box-shadow:var(--shadow-lg);
 }
 .hero-card::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at 20% 20%,rgba(255,255,255,.15) 0%,transparent 60%)}
-.hero-card *{position:relative}
+.hero-card *{position:relative;word-break:break-word;overflow-wrap:anywhere}
 .hero-label{font-size:11px;font-weight:800;letter-spacing:2px;text-transform:uppercase;opacity:.7;margin-bottom:6px}
-.hero-title{font-family:'Fraunces',serif;font-size:28px;font-weight:900;line-height:1.1;margin-bottom:4px}
+.hero-title{font-family:'Fraunces',serif;font-size:28px;font-weight:900;line-height:1.1;margin-bottom:4px;word-break:break-word;overflow-wrap:anywhere}
 .hero-sub{font-size:15px;opacity:.8;font-weight:500}
 
 /* ── COUNTDOWN ──────────────────────────── */
@@ -87,8 +87,8 @@ input,textarea,select{font-family:inherit}
 .sec-action{font-size:14px;font-weight:700;color:var(--v)}
 
 /* ── CARDS ──────────────────────────────── */
-.card{background:white;border-radius:var(--radius);box-shadow:var(--shadow);margin:0 16px 12px;padding:20px;border:1.5px solid rgba(86,41,255,.06)}
-.card-title{font-family:'Fraunces',serif;font-size:20px;font-weight:700;color:var(--ink);margin-bottom:4px}
+.card{background:white;border-radius:var(--radius);box-shadow:var(--shadow);margin:0 16px 12px;padding:20px;border:1.5px solid rgba(86,41,255,.06);overflow:hidden;word-break:break-word;overflow-wrap:anywhere}
+.card-title{font-family:'Fraunces',serif;font-size:20px;font-weight:700;color:var(--ink);margin-bottom:4px;word-break:break-word;overflow-wrap:anywhere}
 .card-meta{font-size:14px;color:var(--t2);font-weight:500;display:flex;gap:12px;flex-wrap:wrap}
 .card-meta span{display:flex;align-items:center;gap:4px}
 
@@ -141,7 +141,7 @@ input,textarea,select{font-family:inherit}
   border:2px solid rgba(86,41,255,.2);background:white;
   box-shadow:var(--shadow);overflow:hidden;
 }
-.result-card-header{background:var(--grad);padding:20px;color:white}
+.result-card-header{background:var(--grad);padding:20px;color:white;word-break:break-word;overflow-wrap:anywhere}
 .result-card-body{padding:20px}
 .lineup-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
 .lineup-chip{background:var(--p);border:1.5px solid rgba(86,41,255,.15);border-radius:20px;padding:6px 14px;font-size:14px;font-weight:700;color:var(--v)}
@@ -447,10 +447,15 @@ function cleanupMarkdownArtifacts(text) {
     .replace(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g, ' ')
     // strip empty-bracket links [](url) — Elementor off-canvas, etc.
     .replace(/\[\]\((https?:\/\/[^)]+)\)/g, ' ')
+    // strip local anchor links [text](#anchor) — menús de navegación
+    .replace(/\[[^\]]+\]\(#[^)]*\)/g, ' ')
     // strip named links, keep only text
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1')
     // strip bare Elementor junk URLs
     .replace(/https?:\/\/\S*(?:elementor|off_canvas|canvas)[^)\s]*/gi, ' ')
+    // strip markdown bold (**text**) and italic (*text*) — keep only text
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
     .replace(/^\s*[*+-]\s*/gm, '')
     .replace(/^>\s*/gm, '')
     .replace(/^[#]{1,6}\s+/gm, '')
@@ -461,16 +466,29 @@ function cleanupCandidateLine(value) {
   return String(value || '')
     .replace(/!\[[^\]]*\]\((https?:\/\/[^)]+)\)/g, ' ')
     .replace(/\[\]\((https?:\/\/[^)]+)\)/g, ' ')
+    .replace(/\[[^\]]+\]\(#[^)]*\)/g, ' ')
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, '$1')
     .replace(/https?:\/\/\S*(?:elementor|off_canvas|canvas)[^)\s]*/gi, ' ')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
     .replace(/^\s*[*+-]\s*/, '')
     .replace(/^#+\s*/, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
 }
 function isBadMetadataLine(value) {
-  const line = normalizeText(cleanupCandidateLine(value));
-  return !line || /^(url source|markdown content|title|image \d+|source|http|www\.)/.test(line);
+  const raw = String(value || '').trim();
+  const line = normalizeText(cleanupCandidateLine(raw));
+  if (!line) return true;
+  // raw line still looks like a URL after cleanup
+  if (/^https?:\/\//i.test(raw) || /^https?:\/\//i.test(line)) return true;
+  // residual markdown anchors or leftover brackets
+  if (/^\[/.test(raw)) return true;
+  // jina.ai metadata headers
+  if (/^(url source|markdown content|title|image \d+|source|http|www\.)/.test(line)) return true;
+  // common navigation / UI chrome lines
+  if (/^(ir al contenido|skip to content|venta de entradas|buy tickets|comprar entradas|aviso legal|politica de privacidad|privacidad|cookies|newsletter|registrarse|registrate|suscribete|siguenos|redes sociales|patrocinadores|colaboradores|prensa y contacto)$/.test(line)) return true;
+  return false;
 }
 const GENERIC_QUERY_WORDS = ['festival','festivales','concierto','conciertos','evento','eventos','entrada','entradas','abono','abonos','tickets','ticket','espana','españa','gira','tour','oficial','cartel','lineup','fechas','fecha'];
 const COMMON_CITY_HINTS = ['madrid','barcelona','valencia','sevilla','malaga','málaga','bilbao','alicante','murcia','zaragoza','granada','cordoba','córdoba','vigo','gijon','gijón','santander','pamplona','salamanca','valladolid','a coruna','a coruña','las palmas','oviedo','leon','león','almeria','almería','cadiz','cádiz','donostia','san sebastian','san sebastián','pozo alcon','pozo alcón','jaen','jaén'];
@@ -684,11 +702,19 @@ function extractCity(address, text) {
 }
 function cleanTitle(title, query, sourceUrl) {
   let out = cleanupCandidateLine(String(title || '')).trim();
+  // If after cleanup the title still looks like a URL → discard it
+  if (/^https?:\/\//i.test(out)) out = '';
   out = out.replace(/\s*[|·]\s*home$/i, '').trim();
   out = out.replace(/\s+-\s+inicio$/i, '').trim();
+  // Remove site name suffix after " - " separator, keep first part if it has query tokens
   const parts = out.split(/\s+-\s+/).map(p => p.trim()).filter(Boolean);
-  if (parts.length === 2 && normalizeText(parts[0]) === normalizeText(parts[1])) out = parts[0];
-  if (!out || /^home$/i.test(out) || /^image\s+\d+$/i.test(out)) {
+  if (parts.length >= 2) {
+    const firstHasTokens = queryTokens(parts[0]).length > 0;
+    const secondIsHomeName = /producciones|teatro|sala|music|events|entradas|tickets|oficial/i.test(parts[parts.length - 1]);
+    if (firstHasTokens || secondIsHomeName) out = parts[0];
+    else if (normalizeText(parts[0]) === normalizeText(parts[1])) out = parts[0];
+  }
+  if (!out || /^home$/i.test(out) || /^image\s+\d+$/i.test(out) || /^https?:\/\//i.test(out)) {
     const host = (sourceUrl || '').replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0].split('.')[0];
     out = host.replace(/[-_]+/g, ' ');
   }
@@ -762,13 +788,22 @@ function extractOfficialWebsite(sourceUrl, rawLinks) {
 }
 function extractBestDescription(text, fallbackName='') {
   const lines = String(text || '').split('\n').map(l => cleanupCandidateLine(l)).filter(Boolean).filter(line => !isBadMetadataLine(line));
+  // Prefer a short punchy line (40–260 chars) that isn't a navigation/metadata line
   const candidate = lines.find(line => {
     const norm = normalizeText(line);
     if (line.length < 40 || line.length > 260) return false;
     if (fallbackName && normalizeText(line) === normalizeText(fallbackName)) return false;
-    return !/^(abonos|entradas|artistas|lineup|cartel|horarios|schedule|viernes|sabado|sábado|domingo|location|venue|recinto|lugar|precio)/.test(norm);
+    if (/^(abonos|entradas|artistas|lineup|cartel|horarios|schedule|viernes|sabado|sábado|domingo|location|venue|recinto|lugar|precio|comprobando|checking)/.test(norm)) return false;
+    // Skip breadcrumb-style lines (contain '>')
+    if (line.includes('>')) return false;
+    return true;
   });
-  return (candidate || '').slice(0, 220);
+  const raw = candidate || '';
+  // Truncate gracefully at sentence boundary
+  if (raw.length <= 220) return raw;
+  const cut = raw.slice(0, 220);
+  const lastDot = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('! '), cut.lastIndexOf('? '));
+  return lastDot > 100 ? cut.slice(0, lastDot + 1) : cut.trimEnd() + '…';
 }
 function scoreResult(info, query, province='') {
   const haystack = slug(`${info.name} ${info.venue} ${info.city} ${info.description} ${info.sourceUrl}`);
@@ -1282,7 +1317,7 @@ function renderDetail() {
       `<button onclick="exportIcal('${ev.id}')" style="display:flex;flex-direction:column;align-items:center;gap:4px;padding:10px 0;border-radius:10px;background:#FFF3CD;color:#856404;font-size:13px;font-weight:700"><span style="font-size:22px">📅</span>Calendario</button>`}
     </div>
 
-    ${ev.description ? `<div class="card"><div style="font-size:15px;color:var(--t2);line-height:1.6">${esc(ev.description)}</div></div>` : ''}
+    ${ev.description ? `<div class="card"><div id="desc-${ev.id}" style="font-size:15px;color:var(--t2);line-height:1.6;overflow:hidden;display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical">${esc(ev.description)}</div>${ev.description.length>180?`<button onclick="var d=document.getElementById('desc-${ev.id}');d.style.webkitLineClamp=d.style.webkitLineClamp?'':'5';this.textContent=d.style.webkitLineClamp?'Leer más…':'Menos ▲'" style="margin-top:6px;font-size:13px;font-weight:700;color:var(--v)">Leer más…</button>`:''}</div>` : ''}
 
     ${(ev.lineup||[]).length>0 ? `
     <div class="sec-header"><div class="sec-title">🎤 Cartel</div></div>

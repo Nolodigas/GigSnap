@@ -47,4 +47,4 @@ La app revisa los eventos próximos al abrirse y mientras permanece abierta. Tam
 
 ---
 
-*GigSnap · by Nolodigas · v2.4*
+*GigSnap · by Nolodigas · v2.5*
