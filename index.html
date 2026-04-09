@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; img-src * data: blob:; connect-src *;">
+<meta name="description" content="GigSnap — Tu agenda musical inteligente. Gestiona conciertos y festivales con IA.">
+<meta name="theme-color" content="#5629FF">
 <title>GigSnap · by Nolodigas</title>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,700;0,9..144,900;1,9..144,700&family=Nunito:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
@@ -339,6 +342,7 @@ let state = {
   detailId: null,
   editId: null,
   updating: false,
+  searchSeq: 0,  // stale-search prevention
 };
 
 const CATS = {
@@ -1081,8 +1085,8 @@ function renderSearch() {
       <div style="font-family:'Fraunces',serif;font-size:28px;font-weight:900;color:var(--ink);margin-bottom:4px">Buscar evento 🔍</div>
       <div style="font-size:15px;color:var(--t2);margin-bottom:20px">Busca conciertos y festivales en España o pega la web oficial. GigSnap prioriza resultados oficiales y acelera la búsqueda con caché local.</div>
       <div class="search-box" style="margin-bottom:12px">
-        <input id="search-input" type="text" placeholder="Ej: The Black Crowes, Mad Cool, o pega la URL oficial" autocomplete="off" onkeydown="if(event.key==='Enter')doSearch()">
-        <button onclick="doSearch()" style="font-size:22px">🔍</button>
+        <input id="search-input" type="text" placeholder="Ej: The Black Crowes, Mad Cool, o pega la URL oficial" autocomplete="off" onkeydown="if(event.key==='Enter')debouncedSearch()">
+        <button onclick="debouncedSearch()" style="font-size:22px">🔍</button>
       </div>
       <div style="display:grid;grid-template-columns:1fr;gap:10px;margin-bottom:12px">
         <select class="field-input" id="search-province">
@@ -1090,7 +1094,7 @@ function renderSearch() {
           <option>A Coruña</option><option>Álava</option><option>Albacete</option><option>Alicante</option><option>Almería</option><option>Asturias</option><option>Ávila</option><option>Badajoz</option><option>Barcelona</option><option>Burgos</option><option>Cáceres</option><option>Cádiz</option><option>Cantabria</option><option>Castellón</option><option>Ciudad Real</option><option>Córdoba</option><option>Cuenca</option><option>Girona</option><option>Granada</option><option>Guadalajara</option><option>Gipuzkoa</option><option>Huelva</option><option>Huesca</option><option>Jaén</option><option>La Rioja</option><option>Las Palmas</option><option>León</option><option>Lleida</option><option>Lugo</option><option>Madrid</option><option>Málaga</option><option>Murcia</option><option>Navarra</option><option>Ourense</option><option>Palencia</option><option>Pontevedra</option><option>Salamanca</option><option>Segovia</option><option>Sevilla</option><option>Soria</option><option>Tarragona</option><option>Santa Cruz de Tenerife</option><option>Teruel</option><option>Toledo</option><option>Valencia</option><option>Valladolid</option><option>Bizkaia</option><option>Zamora</option><option>Zaragoza</option>
         </select>
       </div>
-      <button class="btn-grad" onclick="doSearch()">
+      <button class="btn-grad" onclick="debouncedSearch()">
         <span id="search-btn-content">🔎 Buscar evento</span>
       </button>
     </div>
@@ -1105,10 +1109,25 @@ function renderSearch() {
   `;
 }
 
-async function doSearch() {
+/* ─── DEBOUNCE ─────────────────────────── */
+let _searchTimer = null;
+function debouncedSearch() {
+  clearTimeout(_searchTimer);
+  _searchTimer = setTimeout(() => doSearch(), 400);
+}
+
+async function doSearch(force = true) {
   const q = document.getElementById('search-input')?.value?.trim();
   const province = document.getElementById('search-province')?.value?.trim() || '';
-  if (!q) return;
+  if (!q) {
+    const res = document.getElementById('search-results');
+    if (res && force) res.innerHTML = '';
+    return;
+  }
+
+  // Stale-search prevention: each call increments a seq counter.
+  // If a newer call arrives before this one finishes, this result is discarded.
+  const seq = ++state.searchSeq;
 
   const res = document.getElementById('search-results');
   const btn = document.getElementById('search-btn-content');
@@ -1117,10 +1136,12 @@ async function doSearch() {
 
   try {
     const info = await resolveEventInfo(q, province);
+    if (seq !== state.searchSeq) return; // resultado obsoleto, descartado
     info.searchProvince = province;
     window._searchResult = info;
     res.innerHTML = renderSearchResult(info);
   } catch (e) {
+    if (seq !== state.searchSeq) return;
     res.innerHTML = `<div class="card"><div style="text-align:center;padding:20px">
       <div style="font-size:40px;margin-bottom:12px">🤔</div>
       <div style="font-weight:800;font-size:18px;color:var(--ink);margin-bottom:8px">No pude resolver el evento</div>
@@ -1164,6 +1185,36 @@ function renderSearchResult(info) {
 function addFromSearch() {
   const info = window._searchResult;
   if(!info) return;
+
+  // Dedup: si ya existe un evento con mismo nombre+fecha+recinto, actualizar en lugar de duplicar
+  const existing = state.events.find(ev =>
+    slug(`${ev.name}|${ev.date||''}|${ev.venue||''}|${ev.city||''}`) ===
+    slug(`${info.name||''}|${info.date||''}|${info.venue||''}|${info.city||''}`)
+  );
+  if (existing) {
+    Object.assign(existing, {
+      date:        info.date        || existing.date,
+      dateEnd:     info.dateEnd     || existing.dateEnd,
+      time:        info.time        || existing.time,
+      doorsTime:   info.doorsTime   || existing.doorsTime,
+      venue:       info.venue       || existing.venue,
+      address:     info.address     || existing.address,
+      city:        info.city        || existing.city,
+      description: info.description || existing.description,
+      lineup:      info.lineup?.length ? info.lineup : existing.lineup,
+      website:     info.website     || existing.website,
+      ticketUrl:   info.ticketUrl   || existing.ticketUrl,
+      sourceUrl:   info.sourceUrl   || existing.sourceUrl,
+      searchProvince: info.searchProvince || existing.searchProvince,
+      lastCheckedAt: info.lastCheckedAt || Date.now(),
+    });
+    save();
+    window._searchResult = null;
+    goTo('detail', existing.id);
+    showToast('♻️ Evento actualizado en lugar de duplicado');
+    return;
+  }
+
   const ev = {
     id: uid(),
     name: info.name || '',
@@ -1192,6 +1243,74 @@ function addFromSearch() {
   window._searchResult = null;
   goTo('detail', ev.id);
   showToast('✅ Evento añadido a tus planes');
+}
+
+/* ─── EXPORT / IMPORT ─────────────────── */
+function exportData() {
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    version: '2.6',
+    app: 'GigSnap',
+    events: state.events,
+    searchCache: getCache(),
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `gigsnap-backup-${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  showToast('📦 Copia exportada');
+}
+
+function mergeImportedEvents(items) {
+  const byKey = new Map();
+  [...state.events, ...(Array.isArray(items) ? items : [])].forEach(ev => {
+    if (!ev || !ev.name) return;
+    const key = slug(`${ev.name}|${ev.date||''}|${ev.venue||''}|${ev.city||''}`);
+    if (!byKey.has(key)) {
+      byKey.set(key, {
+        id: ev.id || uid(), type: ev.type || 'concierto',
+        date: '', dateEnd: '', time: '', doorsTime: '', venue: '', address: '', city: '',
+        description: '', lineup: [], website: '', ticketUrl: '', sourceUrl: '', searchProvince: '',
+        lastCheckedAt: Date.now(), notes: '', expenses: [], attachments: [], createdAt: Date.now(),
+        ...ev,
+      });
+    } else {
+      const prev = byKey.get(key);
+      byKey.set(key, {
+        ...prev, ...ev,
+        lineup:      (ev.lineup?.length      ? ev.lineup      : prev.lineup)      || [],
+        expenses:    (ev.expenses?.length    ? ev.expenses    : prev.expenses)    || [],
+        attachments: (ev.attachments?.length ? ev.attachments : prev.attachments) || [],
+      });
+    }
+  });
+  state.events = [...byKey.values()].sort((a,b) => (a.date||'').localeCompare(b.date||''));
+  save();
+}
+
+function importData(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const parsed = JSON.parse(String(e.target.result || '{}'));
+      const incoming = Array.isArray(parsed) ? parsed : parsed.events;
+      if (!Array.isArray(incoming)) throw new Error('Formato no válido');
+      mergeImportedEvents(incoming);
+      if (parsed.searchCache && typeof parsed.searchCache === 'object') saveCache(parsed.searchCache);
+      showToast(`✅ Copia importada (${incoming.length} eventos)`);
+      closeModalForce();
+      render();
+    } catch {
+      showToast('❌ No pude importar la copia', 'error');
+    } finally {
+      input.value = '';
+    }
+  };
+  reader.readAsText(file);
 }
 
 function prefillManual(encodedName) {
@@ -1662,12 +1781,6 @@ function viewImage(src) {
       <img src="${src}" style="max-width:90vw;max-height:85vh;border-radius:16px;object-fit:contain" onclick="event.stopPropagation()">
     </div>`;
 }
-function viewImage(src) {
-  document.getElementById('modal-root').innerHTML=`
-    <div class="modal-overlay center" onclick="closeModalForce()">
-      <img src="${src}" style="max-width:90vw;max-height:85vh;border-radius:16px;object-fit:contain" onclick="event.stopPropagation()">
-    </div>`;
-}
 // Mobile-safe PDF opener: intenta <embed>, si falla descarga
 function openPdf(data, name) {
   try {
@@ -1737,6 +1850,22 @@ function showSettings() {
       <button class="settings-action" onclick="clearCache();closeModalForce();showToast('🧹 Caché vaciada')">Vaciar</button>
     </div>
     <div class="settings-item">
+      <div class="settings-icon">📦</div>
+      <div class="settings-info">
+        <div class="settings-name">Exportar copia de seguridad</div>
+        <div class="settings-sub">Descarga un JSON con todos tus eventos, notas y gastos.</div>
+      </div>
+      <button class="settings-action" onclick="exportData()">Exportar</button>
+    </div>
+    <div class="settings-item">
+      <div class="settings-icon">📥</div>
+      <div class="settings-info">
+        <div class="settings-name">Importar copia de seguridad</div>
+        <div class="settings-sub">Restaura una copia JSON creada por GigSnap. Se fusiona con los datos actuales.</div>
+      </div>
+      <label class="settings-action" style="cursor:pointer">Importar<input type="file" accept="application/json" style="display:none" onchange="importData(this)"></label>
+    </div>
+    <div class="settings-item">
       <div class="settings-icon">🗑️</div>
       <div class="settings-info">
         <div class="settings-name">Borrar todos los datos</div>
@@ -1747,7 +1876,7 @@ function showSettings() {
     <div class="divider"></div>
     <div style="text-align:center;padding:8px 0">
       <div style="font-family:'Fraunces',serif;font-size:18px;font-weight:700;font-style:italic;color:var(--ink)">Gig<span style="color:var(--c)">Snap</span></div>
-      <div style="font-size:12px;color:var(--t3);margin-top:4px">by Nolodigas · v2.1</div>
+      <div style="font-size:12px;color:var(--t3);margin-top:4px">by Nolodigas · v2.6</div>
     </div>
   `, false);
 }
